@@ -382,7 +382,7 @@ class _HomePageState extends State<HomePage> {
         'includeInterface': includeInterface,
         'excludeCaches': excludeCaches,
         'useExplorerCopy': useExplorerCopy,
-      }; 
+      };
       await f.writeAsString(json.encode(obj));
       if (!mounted) return;
       if (showSnack) {
@@ -1219,11 +1219,22 @@ class _HomePageState extends State<HomePage> {
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('Replace existing files?'),
-          content: const Text('This will overwrite your current WTF and Interface folders. Do you want to back them up first?'),
+          content: const Text(
+            'This will overwrite your current WTF and Interface folders. Do you want to back them up first?',
+          ),
           actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(0), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.of(ctx).pop(1), child: const Text('Replace (no backup)')),
-            TextButton(onPressed: () => Navigator.of(ctx).pop(2), child: const Text('Backup & replace')),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(0),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(1),
+              child: const Text('Replace (no backup)'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(2),
+              child: const Text('Backup & replace'),
+            ),
           ],
         ),
       );
@@ -1231,7 +1242,9 @@ class _HomePageState extends State<HomePage> {
       if (choice != 1 && choice != 2) {
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
-        messenger.showSnackBar(const SnackBar(content: Text('Restore cancelled')));
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Restore cancelled')),
+        );
         setState(() => isWorking = false);
         return;
       }
@@ -1432,10 +1445,14 @@ class _HomePageState extends State<HomePage> {
         final ext = p.extension(f.path).toLowerCase();
         return ext == '.zip' || ext == '.7z';
       }).toList();
-      zips.sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+      zips.sort(
+        (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+      );
       if (zips.isNotEmpty) {
         setState(() => lastZipPath = zips.first.path);
-        await _appendLog('Refreshed local backups - newest: ${zips.first.path}');
+        await _appendLog(
+          'Refreshed local backups - newest: ${zips.first.path}',
+        );
       } else {
         setState(() => lastZipPath = null);
       }
@@ -1449,11 +1466,18 @@ class _HomePageState extends State<HomePage> {
       // Use PowerShell to invoke Shell.Application CopyHere which shows the Windows copy UI and overwrite prompts
       final srcPath = p.normalize(src.path);
       final destPath = p.normalize(dest.path);
-      final cmd = r"$s=New-Object -ComObject Shell.Application; $src=$s.NameSpace('" + srcPath + r"'); $dst=$s.NameSpace('" + destPath + r"'); if ($src -eq $null -or $dst -eq $null) { exit 1 }; $dst.CopyHere($src.Items());";
+      final cmd =
+          r"$s=New-Object -ComObject Shell.Application; $src=$s.NameSpace('" +
+          srcPath +
+          r"'); $dst=$s.NameSpace('" +
+          destPath +
+          r"'); if ($src -eq $null -or $dst -eq $null) { exit 1 }; $dst.CopyHere($src.Items());";
       await _appendLog('Starting Windows Explorer copy UI...');
       // Start PowerShell and let it run (it will return once the copy is initiated)
       await Process.run('powershell', ['-NoProfile', '-Command', cmd]);
-      await _appendLog('Explorer copy initiated (please complete any dialogs if shown)');
+      await _appendLog(
+        'Explorer copy initiated (please complete any dialogs if shown)',
+      );
     } catch (e, st) {
       await _appendLog('Explorer copy error: $e\n$st');
       // fallback to programmatic copy
@@ -1711,7 +1735,11 @@ class _HomePageState extends State<HomePage> {
                                   if (lastZipPath == null) {
                                     if (!mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('Latest backup not found locally')),
+                                      const SnackBar(
+                                        content: Text(
+                                          'Latest backup not found locally',
+                                        ),
+                                      ),
                                     );
                                   }
                                 }
