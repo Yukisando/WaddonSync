@@ -70,6 +70,132 @@ class UploadService {
     }
   }
 
+  // Upload using curl as fallback (with retries and verification)
+  Future<Map<String, String?>?> uploadViacurlVerified(
+    File file,
+    String bin,
+  ) async {
+    final name = p.basename(file.path);
+    final url = 'https://filebin.net/$bin/';
+
+    await log('Attempting upload via curl (verified)...');
+
+    const int maxAttempts = 3;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final result = await Process.run('curl', [
+          '-X',
+          'POST',
+          '-F',
+          'file=@${file.path}',
+          '--max-time',
+          '600', // 10 minutes
+          '--connect-timeout',
+          '30',
+          '-w',
+          '\\n%{http_code}', // append HTTP code on last line
+          url,
+        ], runInShell: true);
+
+        final stdoutStr = result.stdout.toString();
+        final stderrStr = result.stderr.toString();
+
+        await log('curl exit code: ${result.exitCode}');
+        if (stdoutStr.isNotEmpty) await log('curl output: $stdoutStr');
+        if (stderrStr.isNotEmpty) await log('curl stderr: $stderrStr');
+
+        // Robustly extract an HTTP status code from stdout or stderr
+        int? httpCode;
+        final trimmedOut = stdoutStr.trim();
+        if (trimmedOut.isNotEmpty) {
+          final lines = trimmedOut.split(RegExp(r'\r?\n'));
+          final lastLine = lines.isNotEmpty ? lines.last.trim() : '';
+          if (RegExp(r'^\d{3}\$').hasMatch(lastLine)) {
+            httpCode = int.tryParse(lastLine);
+          } else {
+            // fallback: find any 3-digit group in output and pick the last occurrence
+            final all = RegExp(r'\b(\d{3})\b').allMatches(trimmedOut).toList();
+            if (all.isNotEmpty) httpCode = int.tryParse(all.last.group(1)!);
+            // last resort: look for common 5xx phrases
+            if (httpCode == null &&
+                trimmedOut.contains('Backend fetch failed')) {
+              httpCode = 503;
+            }
+          }
+        }
+        if (httpCode == null && stderrStr.trim().isNotEmpty) {
+          final allErr = RegExp(
+            r'\b(\d{3})\b',
+          ).allMatches(stderrStr.trim()).toList();
+          if (allErr.isNotEmpty) httpCode = int.tryParse(allErr.last.group(1)!);
+          if (httpCode == null && stderrStr.contains('Backend fetch failed'))
+            httpCode = 503;
+        }
+
+        final uploadUrl = 'https://filebin.net/$bin/$name';
+
+        // Handle retryable exit codes (network errors)
+        if (result.exitCode == 56 ||
+            result.exitCode == 7 ||
+            result.exitCode == 28) {
+          // Exit 56: Recv failure, 7: Failed to connect, 28: Timeout
+          await log(
+            'curl network error (exit ${result.exitCode}), attempt $attempt/$maxAttempts',
+          );
+          if (attempt < maxAttempts) {
+            await Future.delayed(Duration(seconds: attempt * 3));
+            continue;
+          }
+          return {
+            'error':
+                'curl upload failed after $maxAttempts attempts: exit ${result.exitCode} (network error)',
+          };
+        }
+
+        if (httpCode != null && httpCode >= 200 && httpCode < 300) {
+          // Verify the uploaded file is reachable
+          try {
+            final verify = await http
+                .get(Uri.parse(uploadUrl))
+                .timeout(const Duration(seconds: 10));
+            if (verify.statusCode == 200) {
+              await log(
+                'curl upload verified: $uploadUrl (HTTP ${verify.statusCode})',
+              );
+              return {'url': uploadUrl, 'bin': bin, 'verified': 'true'};
+            } else {
+              await log(
+                'Uploaded file not reachable (HTTP ${verify.statusCode}), attempt $attempt',
+              );
+            }
+          } catch (e) {
+            await log('Verification GET failed: $e (attempt $attempt)');
+          }
+        } else {
+          if (httpCode != null && httpCode >= 500 && httpCode < 600) {
+            await log(
+              'Server error (HTTP $httpCode) from curl response, attempt $attempt',
+            );
+            if (attempt < maxAttempts)
+              await Future.delayed(Duration(seconds: attempt * 2));
+            continue;
+          }
+
+          return {
+            'error':
+                'curl upload failed: exit ${result.exitCode} http:$httpCode stdout:${stdoutStr.trim()} stderr:${stderrStr.trim()}',
+          };
+        }
+      } catch (e, st) {
+        await log('curl upload attempt $attempt failed: $e\n$st');
+        if (attempt < maxAttempts)
+          await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+
+    return {'error': 'curl upload failed after $maxAttempts attempts'};
+  }
+
   // Upload to filebin.net via HTTP multipart
   Future<Map<String, String?>?> uploadToFilebin(File file, String bin) async {
     http.Client? client;
@@ -89,7 +215,7 @@ class UploadService {
       final canConnect = await testFilebinConnection();
       if (!canConnect) {
         await log('Connection test failed. Trying curl fallback...');
-        return await uploadViacurl(file, bin);
+        return await uploadViacurlVerified(file, bin);
       }
 
       client = http.Client();
@@ -120,7 +246,24 @@ class UploadService {
       if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
         final url = 'https://filebin.net/$bin/$name';
         await log('Filebin upload succeeded: $url');
-        return {'url': url, 'bin': bin};
+        // Verify file is reachable; if not, try curl fallback
+        try {
+          final verify = await http
+              .get(Uri.parse(url))
+              .timeout(const Duration(seconds: 10));
+          if (verify.statusCode == 200) {
+            await log('HTTP upload verified: $url (HTTP ${verify.statusCode})');
+            return {'url': url, 'bin': bin};
+          } else {
+            await log(
+              'HTTP upload not reachable (HTTP ${verify.statusCode}), falling back to curl',
+            );
+            return await uploadViacurlVerified(file, bin);
+          }
+        } catch (e) {
+          await log('Verification GET failed: $e, falling back to curl');
+          return await uploadViacurlVerified(file, bin);
+        }
       }
 
       final err =
@@ -136,7 +279,7 @@ class UploadService {
           e.toString().contains('Connection')) {
         await log('HTTP client failed. Trying curl fallback...');
         client?.close();
-        return await uploadViacurl(file, bin);
+        return await uploadViacurlVerified(file, bin);
       }
 
       return {'error': err};

@@ -13,6 +13,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:crypto/crypto.dart';
 
+// Services
+import 'services/upload_service.dart';
+
 // Performs the heavy file collection and compression in a separate isolate.
 // Arguments (Map): wtfDir, interfaceDir, includeSavedVars, includeConfig,
 // includeBindings, includeInterface, excludeCaches
@@ -222,6 +225,12 @@ class _HomePageState extends State<HomePage> {
   String? adminHash; // hashed password stored in settings
   bool adminUnlocked = false;
 
+  // Live log streaming
+  final List<String> _liveLogs = [];
+  StreamController<String>? _logController;
+  StreamSubscription<String>? _logSubscription;
+  final ScrollController _logScrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
@@ -232,6 +241,24 @@ class _HomePageState extends State<HomePage> {
     adminHash ??= _hashPassword('lasagne');
     // admin locked by default
     adminUnlocked = false;
+
+    // Initialize live log stream
+    _logController = StreamController<String>.broadcast();
+    _logSubscription = _logController!.stream.listen((line) {
+      setState(() {
+        _liveLogs.add(line);
+        if (_liveLogs.length > 400) _liveLogs.removeAt(0);
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        try {
+          if (_logScrollController.hasClients) {
+            _logScrollController.jumpTo(
+              _logScrollController.position.maxScrollExtent,
+            );
+          }
+        } catch (_) {}
+      });
+    });
   }
 
   final TextEditingController syncIdController = TextEditingController();
@@ -244,6 +271,9 @@ class _HomePageState extends State<HomePage> {
     syncIdController.dispose();
     adminPasswordController.dispose();
     newAdminPasswordController.dispose();
+    _logSubscription?.cancel();
+    _logController?.close();
+    _logScrollController.dispose();
     super.dispose();
   }
 
@@ -604,7 +634,9 @@ class _HomePageState extends State<HomePage> {
       final canConnect = await _testFilebinConnection();
       if (!canConnect) {
         await _appendLog('Connection test failed. Trying curl fallback...');
-        return await _uploadViacurl(file, chosenBin);
+        return await UploadService(
+          _appendLog,
+        ).uploadViacurlVerified(file, chosenBin);
       }
 
       // Use IOClient for better control
@@ -658,7 +690,9 @@ class _HomePageState extends State<HomePage> {
           e.toString().contains('Connection')) {
         await _appendLog('HTTP client failed. Trying curl fallback...');
         client?.close();
-        return await _uploadViacurl(file, chosenBin);
+        return await UploadService(
+          _appendLog,
+        ).uploadViacurlVerified(file, chosenBin);
       }
 
       return {'error': err};
@@ -760,6 +794,10 @@ class _HomePageState extends State<HomePage> {
       // Also print to console for convenience
       // ignore: avoid_print
       print(line);
+      // Push to live log stream for UI clients
+      try {
+        _logController?.add(line);
+      } catch (_) {}
     } catch (e) {
       // best-effort logging only
     }
@@ -1008,71 +1046,6 @@ class _HomePageState extends State<HomePage> {
       await _appendLog('Network check failed for $host: $e');
       return false;
     }
-  }
-
-  void _showLogsDialog() async {
-    // Read full logs (up to 10MB) and then export them to a file so we can
-    // safely clear the live app log to avoid old logs accumulating.
-    final logs = await _readLogs(maxChars: 10 * 1024 * 1024);
-    final exportedPath = await _writeLogsToExportFile(logs);
-    // Clear the live log now that we've exported a copy for the user
-    await _clearLogs();
-
-    if (!mounted) return;
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Application logs'),
-        content: SizedBox(
-          width: 600,
-          child: SingleChildScrollView(
-            child: SelectableText(logs.isNotEmpty ? logs : '(no logs)'),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              await Clipboard.setData(ClipboardData(text: logs));
-              if (!mounted) return;
-              Navigator.of(context).pop();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Logs copied to clipboard')),
-              );
-            },
-            child: const Text('Copy'),
-          ),
-          TextButton(
-            onPressed: () async {
-              if (exportedPath != null) {
-                await Process.run('explorer', ['/select,', exportedPath]);
-              }
-            },
-            child: const Text('Show file'),
-          ),
-          TextButton(
-            onPressed: () async {
-              if (exportedPath == null) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('Export failed')));
-                return;
-              }
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Logs exported to $exportedPath')),
-              );
-              await Process.run('explorer', ['/select,', exportedPath]);
-            },
-            child: const Text('Export'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> pickWtfFolder() async {
@@ -1358,13 +1331,6 @@ class _HomePageState extends State<HomePage> {
                 child: const Text('Retry'),
               ),
               TextButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _showLogsDialog();
-                },
-                child: const Text('View logs'),
-              ),
-              TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
                 child: const Text('Close'),
               ),
@@ -1403,13 +1369,6 @@ class _HomePageState extends State<HomePage> {
                   Navigator.of(context).pop();
                 },
                 child: const Text('Copy error'),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _showLogsDialog();
-                },
-                child: const Text('View logs'),
               ),
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
@@ -1490,6 +1449,47 @@ class _HomePageState extends State<HomePage> {
                 Navigator.of(context).pop();
               },
               child: const Text('Open File'),
+            ),
+            TextButton(
+              onPressed: () async {
+                // Check file availability first
+                try {
+                  final resp = await http
+                      .get(Uri.parse(url))
+                      .timeout(const Duration(seconds: 10));
+                  final message = 'File URL HTTP ${resp.statusCode}';
+                  if (!mounted) return;
+                  showDialog<void>(
+                    context: context,
+                    builder: (dctx) => AlertDialog(
+                      title: const Text('Availability check'),
+                      content: Text(message),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(dctx).pop(),
+                          child: const Text('OK'),
+                        ),
+                      ],
+                    ),
+                  );
+                } catch (e) {
+                  if (!mounted) return;
+                  showDialog<void>(
+                    context: context,
+                    builder: (dctx) => AlertDialog(
+                      title: const Text('Availability check'),
+                      content: Text('Check failed: $e'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(dctx).pop(),
+                          child: const Text('OK'),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+              },
+              child: const Text('Check availability'),
             ),
             TextButton(
               onPressed: () async {
@@ -1599,408 +1599,514 @@ class _HomePageState extends State<HomePage> {
         ),
         actions: [
           IconButton(
-            tooltip: 'Logs',
+            tooltip: 'Live log',
             icon: const Icon(Icons.bug_report),
-            onPressed: () => _showLogsDialog(),
+            onPressed: () {
+              showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                builder: (ctx) => SizedBox(
+                  height: MediaQuery.of(ctx).size.height * 0.6,
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Row(
+                          children: [
+                            const Text(
+                              'Live log',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            const Spacer(),
+                            TextButton(
+                              onPressed: () async {
+                                final allLogs = _liveLogs.join();
+                                await Clipboard.setData(
+                                  ClipboardData(text: allLogs),
+                                );
+                                if (!ctx.mounted) return;
+                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Logs copied to clipboard'),
+                                  ),
+                                );
+                              },
+                              child: const Text('Copy all'),
+                            ),
+                            TextButton(
+                              onPressed: () async {
+                                await _clearLogs();
+                                setState(() => _liveLogs.clear());
+                              },
+                              child: const Text('Clear'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              child: const Text('Close'),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 4),
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                          child: StreamBuilder<String>(
+                            stream: _logController?.stream,
+                            initialData: null,
+                            builder: (context, snapshot) {
+                              return ListView.builder(
+                                controller: _logScrollController,
+                                itemCount: _liveLogs.length,
+                                itemBuilder: (ctx2, idx) => Text(
+                                  _liveLogs[idx],
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
 
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Select source folders (Windows)',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 12),
-              Row(
+      body: Stack(
+        children: [
+          SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(child: Text(wtfPath ?? 'WTF folder not selected')),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    onPressed: pickWtfFolder,
-                    child: const Text('Select WTF'),
+                  const Text(
+                    'Select source folders (Windows)',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      interfacePath ?? 'Interface folder not selected',
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    onPressed: pickInterfaceFolder,
-                    child: const Text('Select Interface'),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 20),
-
-              const Text(
-                'Backup options',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              CheckboxListTile(
-                title: const Text('SavedVariables (recommended)'),
-                value: includeSavedVars,
-                onChanged: (v) => setState(() => includeSavedVars = v ?? true),
-              ),
-              CheckboxListTile(
-                title: const Text('Config.wtf (engine settings)'),
-                value: includeConfig,
-                onChanged: (v) => setState(() => includeConfig = v ?? false),
-              ),
-              CheckboxListTile(
-                title: const Text('Keybindings (bindings-cache.wtf)'),
-                value: includeBindings,
-                onChanged: (v) => setState(() => includeBindings = v ?? false),
-              ),
-              CheckboxListTile(
-                title: const Text('Interface (addons) — optional'),
-                value: includeInterface,
-                onChanged: (v) => setState(() => includeInterface = v ?? false),
-              ),
-              CheckboxListTile(
-                title: const Text('Exclude Cache/WDB folders'),
-                value: excludeCaches,
-                onChanged: (v) => setState(() => excludeCaches = v ?? true),
-              ),
-
-              Row(
-                children: [
-                  ElevatedButton(
-                    onPressed:
-                        (wtfPath != null && interfacePath != null && !isWorking)
-                        ? handleCreateZip
-                        : null,
-                    child: isWorking
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Create ZIP'),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    onPressed: (lastZipPath != null && !isWorking)
-                        ? uploadLatestAndRegister
-                        : null,
-                    child: isWorking
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Upload latest'),
-                  ),
-                  const SizedBox(width: 12),
-                  ElevatedButton(
-                    onPressed: (lastZipPath != null)
-                        ? () async {
-                            // reveal and select the file in explorer
-                            final file = File(lastZipPath!);
-                            if (file.existsSync()) {
-                              await Process.run('explorer', [
-                                '/select,',
-                                p.normalize(file.path),
-                              ]);
-                            }
-                          }
-                        : null,
-                    child: const Text('Show folder'),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 16),
-              const Text(
-                'Sync ID',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(child: Text(syncId ?? 'Generating...')),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    onPressed: () async {
-                      if (syncId == null) return;
-                      final messenger = ScaffoldMessenger.of(context);
-                      await Clipboard.setData(ClipboardData(text: syncId!));
-                      if (!mounted) return;
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('Sync ID copied to clipboard'),
-                        ),
-                      );
-                    },
-                    child: const Text('Copy'),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    onPressed: () async {
-                      final newId = _generateSyncId(16);
-                      final messenger = ScaffoldMessenger.of(context);
-                      await _saveSyncId(newId);
-                      if (!mounted) return;
-                      messenger.showSnackBar(
-                        const SnackBar(content: Text('New Sync ID generated')),
-                      );
-                    },
-                    child: const Text('Regenerate'),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 12),
-              const Text(
-                'Sync by ID',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: syncIdController,
-                      decoration: const InputDecoration(
-                        hintText: 'Enter Sync ID',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    onPressed: () =>
-                        handleSyncById(syncIdController.text.trim()),
-                    child: const Text('Download'),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 12),
-              Builder(
-                builder: (ctx) {
-                  if (adminUnlocked) {
-                    return ExpansionTile(
-                      title: const Text('Registry (GitHub Gist) — Admin'),
-                      childrenPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      children: [
-                        TextField(
-                          decoration: const InputDecoration(
-                            labelText: 'Gist ID (registry.json)',
-                          ),
-                          controller: TextEditingController(
-                            text: gistIdSetting ?? '',
-                          ),
-                          onChanged: (v) => gistIdSetting = v.trim(),
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          decoration: const InputDecoration(
-                            labelText: 'GitHub token (optional, gist scope)',
-                          ),
-                          controller: TextEditingController(
-                            text: githubTokenSetting ?? '',
-                          ),
-                          onChanged: (v) => githubTokenSetting = v.trim(),
-                          obscureText: true,
-                        ),
-                        const SizedBox(height: 8),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                decoration: const InputDecoration(
-                                  labelText: 'Filebin bin name (optional)',
-                                ),
-                                controller: TextEditingController(
-                                  text: filebinBinSetting ?? '',
-                                ),
-                                onChanged: (v) => filebinBinSetting = v.trim(),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            ElevatedButton(
-                              onPressed: () {
-                                final gen = 'wowui-${_generateSyncId(8)}';
-                                setState(() => filebinBinSetting = gen);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Generated bin: $gen'),
-                                  ),
-                                );
-                              },
-                              child: const Text('Generate'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            ElevatedButton(
-                              onPressed: _saveSettings,
-                              child: const Text('Save'),
-                            ),
-                            const SizedBox(width: 8),
-                            ElevatedButton(
-                              onPressed: () async {
-                                final messenger = ScaffoldMessenger.of(context);
-                                // create a new gist if token provided
-                                if (githubTokenSetting == null ||
-                                    githubTokenSetting!.isEmpty) {
-                                  if (!mounted) return;
-                                  messenger.showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'GitHub token required to create a gist',
-                                      ),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                final id = await createRegistryGist(
-                                  githubTokenSetting!,
-                                );
-                                if (id == null) {
-                                  if (!mounted) return;
-                                  messenger.showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Failed to create gist'),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                // Use the state context after awaiting the create call
-                                if (!mounted) return;
-                                setState(() => gistIdSetting = id);
-                                await _saveSettings();
-                                if (!mounted) return;
-                                messenger.showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Gist created and saved'),
-                                  ),
-                                );
-                              },
-                              child: const Text('Create gist'),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: TextField(
-                                controller: newAdminPasswordController,
-                                decoration: const InputDecoration(
-                                  labelText: 'New Admin password',
-                                ),
-                                obscureText: true,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            ElevatedButton(
-                              onPressed: () {
-                                final p = newAdminPasswordController.text;
-                                if (p.isEmpty) {
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Password cannot be empty'),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                _setAdminPassword(p);
-                                newAdminPasswordController.clear();
-                                if (!mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Admin password updated'),
-                                  ),
-                                );
-                              },
-                              child: const Text('Set admin password'),
-                            ),
-                            const SizedBox(width: 8),
-                            ElevatedButton(
-                              onPressed: () async {
-                                // test fetch
-                                if (gistIdSetting == null ||
-                                    gistIdSetting!.isEmpty) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Set Gist ID first'),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                final messenger = ScaffoldMessenger.of(context);
-                                final url = await fetchUrlFromRegistry(
-                                  syncId ?? '',
-                                );
-                                if (url == null) {
-                                  if (!mounted) return;
-                                  messenger.showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'No registry entry found for current Sync ID',
-                                      ),
-                                    ),
-                                  );
-                                } else {
-                                  if (!mounted) return;
-                                  messenger.showSnackBar(
-                                    SnackBar(content: Text('Found URL: $url')),
-                                  );
-                                }
-                              },
-                              child: const Text('Test fetch'),
-                            ),
-                            const SizedBox(width: 8),
-                            ElevatedButton(
-                              onPressed: () async {
-                                setState(() => adminUnlocked = false);
-                                ScaffoldMessenger.of(ctx).showSnackBar(
-                                  const SnackBar(content: Text('Admin locked')),
-                                );
-                              },
-                              child: const Text('Lock'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    );
-                  }
-
-                  final cfgText =
-                      (gistIdSetting != null && gistIdSetting!.isNotEmpty)
-                      ? 'Registry configured'
-                      : 'Registry not configured';
-                  return Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  const SizedBox(height: 12),
+                  Row(
                     children: [
-                      Text(cfgText),
+                      Expanded(
+                        child: Text(wtfPath ?? 'WTF folder not selected'),
+                      ),
+                      const SizedBox(width: 12),
                       ElevatedButton(
-                        onPressed: () => _onAdminPressed(),
-                        child: const Text('Admin'),
+                        onPressed: pickWtfFolder,
+                        child: const Text('Select WTF'),
                       ),
                     ],
-                  );
-                },
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          interfacePath ?? 'Interface folder not selected',
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        onPressed: pickInterfaceFolder,
+                        child: const Text('Select Interface'),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  const Text(
+                    'Backup options',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('SavedVariables (recommended)'),
+                    value: includeSavedVars,
+                    onChanged: (v) =>
+                        setState(() => includeSavedVars = v ?? true),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Config.wtf (engine settings)'),
+                    value: includeConfig,
+                    onChanged: (v) =>
+                        setState(() => includeConfig = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Keybindings (bindings-cache.wtf)'),
+                    value: includeBindings,
+                    onChanged: (v) =>
+                        setState(() => includeBindings = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Interface (addons) — optional'),
+                    value: includeInterface,
+                    onChanged: (v) =>
+                        setState(() => includeInterface = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Exclude Cache/WDB folders'),
+                    value: excludeCaches,
+                    onChanged: (v) => setState(() => excludeCaches = v ?? true),
+                  ),
+
+                  Row(
+                    children: [
+                      ElevatedButton(
+                        onPressed:
+                            (wtfPath != null &&
+                                interfacePath != null &&
+                                !isWorking)
+                            ? handleCreateZip
+                            : null,
+                        child: isWorking
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('Create ZIP'),
+                      ),
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        onPressed: (lastZipPath != null && !isWorking)
+                            ? uploadLatestAndRegister
+                            : null,
+                        child: isWorking
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('Upload latest'),
+                      ),
+                      const SizedBox(width: 12),
+                      ElevatedButton(
+                        onPressed: (lastZipPath != null)
+                            ? () async {
+                                // reveal and select the file in explorer
+                                final file = File(lastZipPath!);
+                                if (file.existsSync()) {
+                                  await Process.run('explorer', [
+                                    '/select,',
+                                    p.normalize(file.path),
+                                  ]);
+                                }
+                              }
+                            : null,
+                        child: const Text('Show folder'),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Sync ID',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(child: Text(syncId ?? 'Generating...')),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () async {
+                          if (syncId == null) return;
+                          final messenger = ScaffoldMessenger.of(context);
+                          await Clipboard.setData(ClipboardData(text: syncId!));
+                          if (!mounted) return;
+                          messenger.showSnackBar(
+                            const SnackBar(
+                              content: Text('Sync ID copied to clipboard'),
+                            ),
+                          );
+                        },
+                        child: const Text('Copy'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () async {
+                          final newId = _generateSyncId(16);
+                          final messenger = ScaffoldMessenger.of(context);
+                          await _saveSyncId(newId);
+                          if (!mounted) return;
+                          messenger.showSnackBar(
+                            const SnackBar(
+                              content: Text('New Sync ID generated'),
+                            ),
+                          );
+                        },
+                        child: const Text('Regenerate'),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Sync by ID',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: syncIdController,
+                          decoration: const InputDecoration(
+                            hintText: 'Enter Sync ID',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () =>
+                            handleSyncById(syncIdController.text.trim()),
+                        child: const Text('Download'),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 12),
+                  Builder(
+                    builder: (ctx) {
+                      if (adminUnlocked) {
+                        return ExpansionTile(
+                          title: const Text('Registry (GitHub Gist) — Admin'),
+                          childrenPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          children: [
+                            TextField(
+                              decoration: const InputDecoration(
+                                labelText: 'Gist ID (registry.json)',
+                              ),
+                              controller: TextEditingController(
+                                text: gistIdSetting ?? '',
+                              ),
+                              onChanged: (v) => gistIdSetting = v.trim(),
+                            ),
+                            const SizedBox(height: 8),
+                            TextField(
+                              decoration: const InputDecoration(
+                                labelText:
+                                    'GitHub token (optional, gist scope)',
+                              ),
+                              controller: TextEditingController(
+                                text: githubTokenSetting ?? '',
+                              ),
+                              onChanged: (v) => githubTokenSetting = v.trim(),
+                              obscureText: true,
+                            ),
+                            const SizedBox(height: 8),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    decoration: const InputDecoration(
+                                      labelText: 'Filebin bin name (optional)',
+                                    ),
+                                    controller: TextEditingController(
+                                      text: filebinBinSetting ?? '',
+                                    ),
+                                    onChanged: (v) =>
+                                        filebinBinSetting = v.trim(),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () {
+                                    final gen = 'wowui-${_generateSyncId(8)}';
+                                    setState(() => filebinBinSetting = gen);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Generated bin: $gen'),
+                                      ),
+                                    );
+                                  },
+                                  child: const Text('Generate'),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                ElevatedButton(
+                                  onPressed: _saveSettings,
+                                  child: const Text('Save'),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () async {
+                                    final messenger = ScaffoldMessenger.of(
+                                      context,
+                                    );
+                                    // create a new gist if token provided
+                                    if (githubTokenSetting == null ||
+                                        githubTokenSetting!.isEmpty) {
+                                      if (!mounted) return;
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'GitHub token required to create a gist',
+                                          ),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    final id = await createRegistryGist(
+                                      githubTokenSetting!,
+                                    );
+                                    if (id == null) {
+                                      if (!mounted) return;
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Failed to create gist',
+                                          ),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    // Use the state context after awaiting the create call
+                                    if (!mounted) return;
+                                    setState(() => gistIdSetting = id);
+                                    await _saveSettings();
+                                    if (!mounted) return;
+                                    messenger.showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Gist created and saved'),
+                                      ),
+                                    );
+                                  },
+                                  child: const Text('Create gist'),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: TextField(
+                                    controller: newAdminPasswordController,
+                                    decoration: const InputDecoration(
+                                      labelText: 'New Admin password',
+                                    ),
+                                    obscureText: true,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () {
+                                    final p = newAdminPasswordController.text;
+                                    if (p.isEmpty) {
+                                      if (!mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Password cannot be empty',
+                                          ),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    _setAdminPassword(p);
+                                    newAdminPasswordController.clear();
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Admin password updated'),
+                                      ),
+                                    );
+                                  },
+                                  child: const Text('Set admin password'),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () async {
+                                    // test fetch
+                                    if (gistIdSetting == null ||
+                                        gistIdSetting!.isEmpty) {
+                                      ScaffoldMessenger.of(ctx).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Set Gist ID first'),
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    final messenger = ScaffoldMessenger.of(
+                                      context,
+                                    );
+                                    final url = await fetchUrlFromRegistry(
+                                      syncId ?? '',
+                                    );
+                                    if (url == null) {
+                                      if (!mounted) return;
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'No registry entry found for current Sync ID',
+                                          ),
+                                        ),
+                                      );
+                                    } else {
+                                      if (!mounted) return;
+                                      messenger.showSnackBar(
+                                        SnackBar(
+                                          content: Text('Found URL: $url'),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  child: const Text('Test fetch'),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () async {
+                                    setState(() => adminUnlocked = false);
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Admin locked'),
+                                      ),
+                                    );
+                                  },
+                                  child: const Text('Lock'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        );
+                      }
+
+                      final cfgText =
+                          (gistIdSetting != null && gistIdSetting!.isNotEmpty)
+                          ? 'Registry configured'
+                          : 'Registry not configured';
+                      return Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(cfgText),
+                          ElevatedButton(
+                            onPressed: () => _onAdminPressed(),
+                            child: const Text('Admin'),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
+
+          // Live log panel
+        ],
       ),
     );
   }
