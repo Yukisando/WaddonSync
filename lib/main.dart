@@ -210,11 +210,23 @@ class _HomePageState extends State<HomePage> {
 
   bool isWorking = false;
 
-  // Derived paths
+  // Derived paths. Prefer the _retail_ subfolder when present.
+  String? get _effectiveWowRoot {
+    if (wowRootPath == null) return null;
+    // If user selected the retail folder directly, honor it
+    if (p.basename(wowRootPath!) == '_retail_') return wowRootPath;
+    // If a _retail_ subfolder exists under the selected root, prefer it
+    final retailCandidate = p.join(wowRootPath!, '_retail_');
+    if (Directory(retailCandidate).existsSync()) return retailCandidate;
+    // Fallback to the root as given
+    return wowRootPath;
+  }
+
   String? get wtfPath =>
-      wowRootPath != null ? p.join(wowRootPath!, 'WTF') : null;
-  String? get interfacePath =>
-      wowRootPath != null ? p.join(wowRootPath!, 'Interface') : null;
+      _effectiveWowRoot != null ? p.join(_effectiveWowRoot!, 'WTF') : null;
+  String? get interfacePath => _effectiveWowRoot != null
+      ? p.join(_effectiveWowRoot!, 'Interface')
+      : null;
 
   // Backup options
   bool includeSavedVars = true;
@@ -1125,7 +1137,7 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      if (_driveService == null) _driveService = GoogleDriveService(_appendLog);
+      _driveService ??= GoogleDriveService(_appendLog);
 
       final initialized = await _driveService!.initialize();
       if (!initialized) {
@@ -1344,6 +1356,241 @@ class _HomePageState extends State<HomePage> {
     } catch (e, st) {
       await _appendLog('Failed to refresh local backups: $e\n$st');
     }
+  }
+
+  // Opens the local backups folder (creates it if necessary). If a latest backup
+  // exists it will be selected, otherwise the folder is simply opened.
+  Future<void> _openLocalBackupFolder() async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final folder = Directory(
+        p.join(appDir.parent.path, 'com.waddonsync', 'WaddonSync'),
+      );
+      if (!await folder.exists()) await folder.create(recursive: true);
+
+      if (lastZipPath != null && File(lastZipPath!).existsSync()) {
+        await Process.run('explorer', [
+          '/select,',
+          p.normalize(File(lastZipPath!).path),
+        ]);
+      } else {
+        await Process.run('explorer', [p.normalize(folder.path)]);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to open backup folder: $e')),
+      );
+    }
+  }
+
+  // Shows a dialog listing online backups (Google Drive). Latest is selected
+  // by default. Allows downloading/applying a selected backup and deleting
+  // individual online backups via the bin icon.
+  Future<void> _showManageOnlineBackups() async {
+    final messenger = ScaffoldMessenger.of(context);
+
+    _driveService ??= GoogleDriveService(_appendLog);
+    final initialized = await _driveService!.initialize();
+    if (!initialized) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to initialize Google Drive')),
+      );
+      return;
+    }
+
+    var backups = await _driveService!.listBackups();
+
+    if (backups.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('No online backups found')),
+      );
+      return;
+    }
+
+    String? selectedFileId = backups.first['fileId'] as String?;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx2, setState2) => AlertDialog(
+          title: const Text('Manage online backups'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: MediaQuery.of(ctx2).size.height * 0.5,
+            child: Column(
+              children: [
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: backups.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (ctx3, idx) {
+                      final b = backups[idx];
+                      final fid = b['fileId'] as String?;
+                      final name = b['name'] as String? ?? '';
+                      final created = b['createdTime'] as String? ?? '';
+                      final size = b['size']?.toString() ?? '';
+
+                      return ListTile(
+                        leading: Radio<String>(
+                          value: fid ?? '',
+                          groupValue: selectedFileId ?? '',
+                          onChanged: (v) => setState2(() => selectedFileId = v),
+                        ),
+                        title: Text(name),
+                        subtitle: Text('$created • ${size} bytes'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete),
+                          tooltip: 'Delete backup',
+                          onPressed: fid == null
+                              ? null
+                              : () async {
+                                  final confirm = await showDialog<bool>(
+                                    context: ctx2,
+                                    builder: (c) => AlertDialog(
+                                      title: const Text('Delete backup?'),
+                                      content: Text(
+                                        'Delete "$name" from your Google Drive backups? This cannot be undone.',
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.of(c).pop(false),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.of(c).pop(true),
+                                          child: const Text('Delete'),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+
+                                  if (confirm != true) return;
+
+                                  final ok = await _driveService!.deleteBackup(
+                                    fid,
+                                  );
+                                  if (ok) {
+                                    setState2(() => backups.removeAt(idx));
+                                    if (selectedFileId == fid) {
+                                      setState2(
+                                        () =>
+                                            selectedFileId = backups.isNotEmpty
+                                            ? backups.first['fileId'] as String?
+                                            : null,
+                                      );
+                                    }
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Backup deleted'),
+                                      ),
+                                    );
+                                  } else {
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Failed to delete backup',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx2).pop(),
+              child: const Text('Close'),
+            ),
+            TextButton(
+              onPressed: selectedFileId == null
+                  ? null
+                  : () async {
+                      final bIndex = backups.indexWhere(
+                        (e) => e['fileId'] == selectedFileId,
+                      );
+                      if (bIndex < 0) return;
+                      final b = backups[bIndex];
+                      final name = b['name'] as String? ?? 'backup.zip';
+                      final outFile = await _getLocalFile(name);
+                      final file = await downloadFromDrive(
+                        selectedFileId!,
+                        outFile.path,
+                      );
+                      if (file == null) {
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Failed to download selected backup'),
+                          ),
+                        );
+                        return;
+                      }
+
+                      setState(() => lastZipPath = file.path);
+
+                      // Ask to apply like existing flow
+                      if (!mounted) return;
+                      final apply = await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Backup downloaded'),
+                          content: SelectableText(
+                            'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(ctx).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.of(ctx).pop(true),
+                              child: const Text('Apply'),
+                            ),
+                          ],
+                        ),
+                      );
+
+                      Navigator.of(ctx2).pop();
+
+                      if (apply == true) {
+                        final err = await _applyBackupFile(file);
+                        if (err == null) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Apply completed')),
+                          );
+                        } else {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Apply failed: $err')),
+                          );
+                        }
+                      } else {
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Downloaded to: ${file.path}'),
+                          ),
+                        );
+                      }
+                    },
+              child: const Text('Download & Apply'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _applyLatestLocal() async {
@@ -1739,37 +1986,20 @@ class _HomePageState extends State<HomePage> {
                       ),
                       const SizedBox(width: 8),
                       OutlinedButton(
-                        onPressed: (lastZipPath != null)
-                            ? () async {
-                                // reveal and select the file in explorer
-                                final file = File(lastZipPath!);
-                                if (file.existsSync()) {
-                                  await Process.run('explorer', [
-                                    '/select,',
-                                    p.normalize(file.path),
-                                  ]);
-                                } else {
-                                  // file missing - refresh local index
-                                  await _refreshLocalBackups();
-                                  if (!mounted) return;
-                                  if (lastZipPath == null) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                          'Latest backup not found locally',
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                }
-                              }
-                            : null,
+                        onPressed: (!isWorking) ? _openLocalBackupFolder : null,
                         child: const Text('Show folder'),
                       ),
                       const SizedBox(width: 8),
                       OutlinedButton(
                         onPressed: _refreshLocalBackups,
                         child: const Text('Refresh'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        onPressed: (!isWorking)
+                            ? _showManageOnlineBackups
+                            : null,
+                        child: const Text('Manage online backups'),
                       ),
                     ],
                   ),
