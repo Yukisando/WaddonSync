@@ -343,6 +343,23 @@ class GoogleDriveService {
     }
   }
 
+  /// Deletes a single backup file by fileId. Returns true on success.
+  Future<bool> deleteBackup(String fileId) async {
+    try {
+      if (_driveApi == null) {
+        final initialized = await initialize();
+        if (!initialized) return false;
+      }
+
+      await _driveApi!.files.delete(fileId);
+      await log('Deleted backup: $fileId');
+      return true;
+    } catch (e, st) {
+      await log('Failed to delete backup $fileId: $e\n$st');
+      return false;
+    }
+  }
+
   /// Logs out and clears all stored credentials
   Future<bool> logout() async {
     try {
