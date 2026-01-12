@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 
@@ -78,12 +79,14 @@ class UploadService {
     final name = p.basename(file.path);
     final url = 'https://filebin.net/$bin/';
 
-    await log('Attempting upload via curl (verified)...');
+    await log(
+      'Attempting upload via curl (verified) with --fail and --retry flags...',
+    );
 
-    const int maxAttempts = 3;
+    const int maxAttempts = 8;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        final result = await Process.run('curl', [
+        final args = [
           '-X',
           'POST',
           '-F',
@@ -92,10 +95,20 @@ class UploadService {
           '600', // 10 minutes
           '--connect-timeout',
           '30',
+          '--http1.1',
+          '--fail', // treat HTTP 4xx/5xx as failures (non-zero exit)
+          '--retry',
+          '6', // let curl do more retries for transient errors
+          '--retry-delay',
+          '5',
+          '--retry-connrefused',
+          '--retry-all-errors',
           '-w',
-          '\\n%{http_code}', // append HTTP code on last line
+          '\n%{http_code}', // append HTTP code on last line
           url,
-        ], runInShell: true);
+        ];
+        await log('curl command: curl ${args.join(' ')}');
+        final result = await Process.run('curl', args, runInShell: true);
 
         final stdoutStr = result.stdout.toString();
         final stderrStr = result.stderr.toString();
@@ -110,8 +123,10 @@ class UploadService {
         if (trimmedOut.isNotEmpty) {
           final lines = trimmedOut.split(RegExp(r'\r?\n'));
           final lastLine = lines.isNotEmpty ? lines.last.trim() : '';
-          if (RegExp(r'^\d{3}\$').hasMatch(lastLine)) {
-            httpCode = int.tryParse(lastLine);
+          if (RegExp(r'^\d{3}$').hasMatch(lastLine) ||
+              RegExp(r'^\d{3}$').hasMatch(trimmedOut)) {
+            // last line was just the HTTP code
+            httpCode = int.tryParse(lastLine.replaceAll(RegExp(r'\D'), ''));
           } else {
             // fallback: find any 3-digit group in output and pick the last occurrence
             final all = RegExp(r'\b(\d{3})\b').allMatches(trimmedOut).toList();
@@ -173,11 +188,12 @@ class UploadService {
           }
         } else {
           if (httpCode != null && httpCode >= 500 && httpCode < 600) {
+            final delaySec = min((1 << attempt) + Random().nextInt(4), 120);
             await log(
-              'Server error (HTTP $httpCode) from curl response, attempt $attempt',
+              'Server error (HTTP $httpCode) from curl response, attempt $attempt/$maxAttempts. Retrying in ${delaySec}s...',
             );
             if (attempt < maxAttempts)
-              await Future.delayed(Duration(seconds: attempt * 2));
+              await Future.delayed(Duration(seconds: delaySec));
             continue;
           }
 
@@ -188,8 +204,11 @@ class UploadService {
         }
       } catch (e, st) {
         await log('curl upload attempt $attempt failed: $e\n$st');
-        if (attempt < maxAttempts)
-          await Future.delayed(Duration(seconds: attempt * 2));
+        if (attempt < maxAttempts) {
+          final delaySec = min((1 << attempt) + Random().nextInt(4), 120);
+          await log('Retrying in ${delaySec}s...');
+          await Future.delayed(Duration(seconds: delaySec));
+        }
       }
     }
 
@@ -269,6 +288,17 @@ class UploadService {
       final err =
           'filebin responded with status ${streamed.statusCode}: $respBody';
       await log('Filebin upload failed: $err');
+
+      // For certain recoverable server responses, try the curl fallback
+      if (streamed.statusCode >= 500 ||
+          streamed.statusCode == 405 ||
+          streamed.statusCode == 429) {
+        await log(
+          'Server responded ${streamed.statusCode}. Trying curl fallback...',
+        );
+        return await uploadViacurlVerified(file, bin);
+      }
+
       return {'error': err};
     } catch (e, st) {
       final err = 'Exception during filebin upload: $e\n$st';

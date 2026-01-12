@@ -210,9 +210,9 @@ class _HomePageState extends State<HomePage> {
   // sync id and options
   String? syncId;
   bool includeSavedVars = true;
-  bool includeConfig = true;
+  bool includeConfig = false; // default off
   bool includeBindings = true;
-  bool includeInterface = true;
+  bool includeInterface = false; // default off
   bool excludeCaches = true;
 
   // Settings (persisted)
@@ -235,6 +235,7 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _loadOrCreateSyncId();
+    _loadSettings();
     _attemptAutoDetect();
     _migrateOldTempZips();
     // ensure admin password is present (hardcoded default for now)
@@ -362,7 +363,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _migrateOldTempZips() async {
     try {
       final pattern = RegExp(
-        r'^waddonsync_backup_.*\.zip\$',
+        r'^waddonsync_backup_.*\.(zip|7z)\$',
         caseSensitive: false,
       );
       final tempDir = Directory.systemTemp;
@@ -387,11 +388,10 @@ class _HomePageState extends State<HomePage> {
         p.join(appDir.parent.path, 'com.waddonsync', 'WaddonSync'),
       );
       if (await folder.exists()) {
-        final zips = folder
-            .listSync()
-            .whereType<File>()
-            .where((f) => p.extension(f.path).toLowerCase() == '.zip')
-            .toList();
+        final zips = folder.listSync().whereType<File>().where((f) {
+          final ext = p.extension(f.path).toLowerCase();
+          return ext == '.zip' || ext == '.7z';
+        }).toList();
         zips.sort(
           (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
         );
@@ -455,6 +455,12 @@ class _HomePageState extends State<HomePage> {
         gistIdSetting = (m['gistId'] as String?)?.trim();
         githubTokenSetting = (m['githubToken'] as String?)?.trim();
         filebinBinSetting = (m['filebinBin'] as String?)?.trim();
+        includeSavedVars = (m['includeSavedVars'] as bool?) ?? includeSavedVars;
+        includeConfig = (m['includeConfig'] as bool?) ?? includeConfig;
+        includeBindings = (m['includeBindings'] as bool?) ?? includeBindings;
+        includeInterface = (m['includeInterface'] as bool?) ?? includeInterface;
+        excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
+
         // Only overwrite the admin hash if a non-empty value was saved. This preserves
         // the built-in default (hashed 'lasagne') when settings.json contains an
         // empty string or was not previously set.
@@ -468,7 +474,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _saveSettings() async {
+  Future<void> _saveSettings({bool showSnack = true}) async {
     try {
       final f = await _getLocalFile('settings.json');
       final obj = {
@@ -476,12 +482,19 @@ class _HomePageState extends State<HomePage> {
         'githubToken': githubTokenSetting ?? '',
         'filebinBin': filebinBinSetting ?? '',
         'adminHash': adminHash ?? '',
+        'includeSavedVars': includeSavedVars,
+        'includeConfig': includeConfig,
+        'includeBindings': includeBindings,
+        'includeInterface': includeInterface,
+        'excludeCaches': excludeCaches,
       };
       await f.writeAsString(json.encode(obj));
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Settings saved')));
+      if (showSnack) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Settings saved')));
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -1732,25 +1745,34 @@ class _HomePageState extends State<HomePage> {
                   CheckboxListTile(
                     title: const Text('Config.wtf (engine settings)'),
                     value: includeConfig,
-                    onChanged: (v) =>
-                        setState(() => includeConfig = v ?? false),
+                    onChanged: (v) => setState(() {
+                      includeConfig = v ?? false;
+                      _saveSettings(showSnack: false);
+                    }),
                   ),
                   CheckboxListTile(
                     title: const Text('Keybindings (bindings-cache.wtf)'),
                     value: includeBindings,
-                    onChanged: (v) =>
-                        setState(() => includeBindings = v ?? false),
+                    onChanged: (v) => setState(() {
+                      includeBindings = v ?? false;
+                      _saveSettings(showSnack: false);
+                    }),
                   ),
                   CheckboxListTile(
                     title: const Text('Interface (addons) — optional'),
                     value: includeInterface,
-                    onChanged: (v) =>
-                        setState(() => includeInterface = v ?? false),
+                    onChanged: (v) => setState(() {
+                      includeInterface = v ?? false;
+                      _saveSettings(showSnack: false);
+                    }),
                   ),
                   CheckboxListTile(
                     title: const Text('Exclude Cache/WDB folders'),
                     value: excludeCaches,
-                    onChanged: (v) => setState(() => excludeCaches = v ?? true),
+                    onChanged: (v) => setState(() {
+                      excludeCaches = v ?? true;
+                      _saveSettings(showSnack: false);
+                    }),
                   ),
 
                   Row(
