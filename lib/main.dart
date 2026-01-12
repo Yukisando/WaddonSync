@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math';
 import 'dart:convert';
 import 'dart:async';
 
@@ -8,13 +7,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
-import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart';
-import 'package:crypto/crypto.dart';
 
 // Services
-import 'services/upload_service.dart';
+import 'services/google_drive_service.dart';
 
 // Performs the heavy file collection and compression in a separate isolate.
 // Arguments (Map): wtfDir, interfaceDir, includeSavedVars, includeConfig,
@@ -213,23 +210,15 @@ class _HomePageState extends State<HomePage> {
 
   bool isWorking = false;
 
-  // sync id and options
-  String? syncId;
+  // Backup options
   bool includeSavedVars = true;
   bool includeConfig = false; // default off
   bool includeBindings = true;
   bool includeInterface = false; // default off
   bool excludeCaches = true;
 
-  // Settings (persisted)
-  String? gistIdSetting; // the gist id where the registry.json is stored
-  String? githubTokenSetting; // personal access token (optional)
-  String?
-  filebinBinSetting; // optional explicit bin name for filebin uploads // provider is fixed to filebin.net
-
-  // admin controls
-  String? adminHash; // hashed password stored in settings
-  bool adminUnlocked = false;
+  // Google Drive service
+  GoogleDriveService? _driveService;
 
   // Live log streaming
   final List<String> _liveLogs = [];
@@ -240,14 +229,9 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    _loadOrCreateSyncId();
     _loadSettings();
     _attemptAutoDetect();
     _migrateOldTempZips();
-    // ensure admin password is present (hardcoded default for now)
-    adminHash ??= _hashPassword('lasagne');
-    // admin locked by default
-    adminUnlocked = false;
 
     // Initialize live log stream
     _logController = StreamController<String>.broadcast();
@@ -266,18 +250,13 @@ class _HomePageState extends State<HomePage> {
         } catch (_) {}
       });
     });
-  }
 
-  final TextEditingController syncIdController = TextEditingController();
-  final TextEditingController adminPasswordController = TextEditingController();
-  final TextEditingController newAdminPasswordController =
-      TextEditingController();
+    // Initialize Google Drive service
+    _driveService = GoogleDriveService(_appendLog);
+  }
 
   @override
   void dispose() {
-    syncIdController.dispose();
-    adminPasswordController.dispose();
-    newAdminPasswordController.dispose();
     _logSubscription?.cancel();
     _logController?.close();
     _logScrollController.dispose();
@@ -292,44 +271,6 @@ class _HomePageState extends State<HomePage> {
     );
     if (!await appFolder.exists()) await appFolder.create(recursive: true);
     return File(p.join(appFolder.path, name));
-  }
-
-  Future<void> _loadOrCreateSyncId() async {
-    try {
-      final f = await _getLocalFile('sync_id.txt');
-      if (await f.exists()) {
-        final s = await f.readAsString();
-        setState(() => syncId = s.trim());
-      } else {
-        final s = _generateSyncId(16);
-        await f.writeAsString(s);
-        setState(() => syncId = s);
-      }
-    } catch (e) {
-      // ignore and generate in-memory
-      setState(() => syncId = _generateSyncId(16));
-    }
-
-    // load saved settings (gist id / token)
-    await _loadSettings();
-    // migrate any old app folder names to com.waddonsync root
-    await _migrateAppFolderIfNeeded();
-  }
-
-  String _generateSyncId(int length) {
-    const chars =
-        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final rand = Random.secure();
-    return List.generate(
-      length,
-      (_) => chars[rand.nextInt(chars.length)],
-    ).join();
-  }
-
-  Future<void> _saveSyncId(String newId) async {
-    final f = await _getLocalFile('sync_id.txt');
-    await f.writeAsString(newId);
-    setState(() => syncId = newId);
   }
 
   // Very simple Windows auto-detect: check common Program Files locations
@@ -408,49 +349,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // Migrate existing app folder (if it was created under com.example) to com.waddonsync/WaddonSync
-  Future<void> _migrateAppFolderIfNeeded() async {
-    try {
-      final appDir = await getApplicationSupportDirectory();
-      final oldFolder = Directory(p.join(appDir.path, 'WaddonSync'));
-      final newFolder = Directory(
-        p.join(appDir.parent.path, 'com.waddonsync', 'WaddonSync'),
-      );
-      if (await oldFolder.exists()) {
-        if (!await newFolder.exists()) await newFolder.create(recursive: true);
-        for (final entity in oldFolder.listSync(recursive: false)) {
-          final dest = p.join(newFolder.path, p.basename(entity.path));
-          if (entity is File) {
-            final f = File(dest);
-            if (!await f.exists()) await entity.copy(dest);
-          } else if (entity is Directory) {
-            final d = Directory(dest);
-            if (!await d.exists()) await entity.rename(dest);
-          }
-        }
-        // attempt to remove old folder if empty
-        try {
-          if (oldFolder.listSync().isEmpty) {
-            await oldFolder.delete(recursive: true);
-          }
-        } catch (e) {
-          await _appendLog('Failed to remove old folder: $e');
-        }
-        final zips = newFolder
-            .listSync()
-            .whereType<File>()
-            .where((f) => p.extension(f.path).toLowerCase() == '.zip')
-            .toList();
-        zips.sort(
-          (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
-        );
-        if (zips.isNotEmpty) setState(() => lastZipPath = zips.first.path);
-      }
-    } catch (e) {
-      // ignore
-    }
-  }
-
   Future<void> _loadSettings() async {
     try {
       final f = await _getLocalFile('settings.json');
@@ -458,22 +356,11 @@ class _HomePageState extends State<HomePage> {
       final s = await f.readAsString();
       final m = json.decode(s) as Map<String, dynamic>;
       setState(() {
-        gistIdSetting = (m['gistId'] as String?)?.trim();
-        githubTokenSetting = (m['githubToken'] as String?)?.trim();
-        filebinBinSetting = (m['filebinBin'] as String?)?.trim();
         includeSavedVars = (m['includeSavedVars'] as bool?) ?? includeSavedVars;
         includeConfig = (m['includeConfig'] as bool?) ?? includeConfig;
         includeBindings = (m['includeBindings'] as bool?) ?? includeBindings;
         includeInterface = (m['includeInterface'] as bool?) ?? includeInterface;
         excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
-
-        // Only overwrite the admin hash if a non-empty value was saved. This preserves
-        // the built-in default (hashed 'lasagne') when settings.json contains an
-        // empty string or was not previously set.
-        final loadedAdminHash = (m['adminHash'] as String?)?.trim();
-        if (loadedAdminHash != null && loadedAdminHash.isNotEmpty) {
-          adminHash = loadedAdminHash;
-        }
       });
     } catch (e) {
       // ignore
@@ -484,10 +371,6 @@ class _HomePageState extends State<HomePage> {
     try {
       final f = await _getLocalFile('settings.json');
       final obj = {
-        'gistId': gistIdSetting ?? '',
-        'githubToken': githubTokenSetting ?? '',
-        'filebinBin': filebinBinSetting ?? '',
-        'adminHash': adminHash ?? '',
         'includeSavedVars': includeSavedVars,
         'includeConfig': includeConfig,
         'includeBindings': includeBindings,
@@ -509,161 +392,54 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<String?> createRegistryGist(String token) async {
+  // Upload to Google Drive
+  Future<Map<String, String?>?> uploadToDrive(File file) async {
     try {
-      final uri = Uri.parse('https://api.github.com/gists');
-      final body = json.encode({
-        'description': 'WaddonSync registry',
-        'public': false,
-        'files': {
-          'registry.json': {'content': json.encode({})},
-        },
-      });
-      final resp = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'token $token',
-          'Content-Type': 'application/json',
-        },
-        body: body,
-      );
-      if (resp.statusCode >= 200 && resp.statusCode < 300) {
-        final data = json.decode(resp.body) as Map<String, dynamic>;
-        return data['id'] as String?;
+      if (_driveService == null) {
+        await _appendLog('Initializing Google Drive service...');
+        _driveService = GoogleDriveService(_appendLog);
       }
-      return null;
-    } catch (e) {
-      return null;
+
+      // Initialize if not already authenticated
+      final isAuth = await _driveService!.isAuthenticated();
+      if (!isAuth) {
+        await _appendLog('Google Drive authentication required');
+        final initialized = await _driveService!.initialize();
+        if (!initialized) {
+          return {'error': 'Failed to authenticate with Google Drive'};
+        }
+      } else {
+        // Ensure Drive service is initialized
+        final initialized = await _driveService!.initialize();
+        if (!initialized) {
+          return {'error': 'Failed to initialize Google Drive service'};
+        }
+      }
+
+      // Upload file
+      await _appendLog('Uploading to Google Drive...');
+      final result = await _driveService!.uploadFile(file);
+
+      return result;
+    } catch (e, st) {
+      await _appendLog('Google Drive upload error: $e\n$st');
+      return {'error': 'Upload failed: $e'};
     }
   }
 
-  String _hashPassword(String password) {
-    final bytes = utf8.encode(password);
-    final digest = sha256.convert(bytes);
-    return digest.toString();
-  }
-
-  void _setAdminPassword(String password) {
-    adminHash = _hashPassword(password);
-    _saveSettings();
-    setState(() => adminUnlocked = true);
-  }
-
-  bool _verifyAdminPassword(String password) {
-    if (adminHash == null || adminHash!.isEmpty) return false;
-    return _hashPassword(password) == adminHash;
-  }
-
-  // Upload to transfer.sh and try to extract any expiry/ttl from response headers
-  Future<Map<String, String?>?> uploadToTransferSh(File file) async {
-    // transfer.sh support has been removed. Use filebin.net instead.
-    await _appendLog(
-      'transfer.sh disabled; attempted upload to transfer.sh blocked by policy.',
-    );
-    return {'error': 'transfer.sh disabled; use filebin.net instead'};
-  }
-
-  // Upload to filebin.net via centralized UploadService (handles fallbacks)
-  Future<Map<String, String?>?> uploadToFilebin(
-    File file, {
-    String? bin,
-  }) async {
-    final chosenBin =
-        bin ??
-        (filebinBinSetting?.isNotEmpty == true
-            ? filebinBinSetting!
-            : 'wowui-${_generateSyncId(8)}');
-
-    // Delegate to UploadService which already implements retries, curl fallback,
-    // server status handling, and verification.
-    final svc = UploadService(_appendLog);
-    final res = await svc.uploadToFilebin(file, chosenBin);
-
-    if (res == null) return null;
-    // If underlying service returned an error, log it here for consistency
-    if (res['error'] != null) {
-      await _appendLog('UploadService reported: ${res['error']}');
-    }
-    return res;
-  }
-
-  Future<bool> updateRegistryOnGithub(
-    String id,
-    String transferUrl, {
-    String? expires,
-    String? provider,
-    String? extra,
-  }) async {
-    final gistId = gistIdSetting;
-    final token = githubTokenSetting ?? Platform.environment['GITHUB_TOKEN'];
-    if (gistId == null || gistId.isEmpty) return false;
-    if (token == null || token.isEmpty) return false;
-
-    final gistApi = Uri.parse('https://api.github.com/gists/$gistId');
+  // Download from Google Drive
+  Future<File?> downloadFromDrive(String fileId, String savePath) async {
     try {
-      final resp = await http.get(gistApi);
-      if (resp.statusCode != 200) return false;
-      final data = json.decode(resp.body) as Map<String, dynamic>;
-      final files = data['files'] as Map<String, dynamic>;
-      final registryContent = files['registry.json']?['content'] ?? '{}';
-      final registry = json.decode(registryContent) as Map<String, dynamic>;
-      final entry = {
-        'url': transferUrl,
-        'timestamp': DateTime.now().toIso8601String(),
-        'expires': expires,
-        'provider': provider ?? 'transfer',
-      };
-      if (extra != null) entry['extra'] = extra;
-      registry[id] = entry;
+      if (_driveService == null) {
+        _driveService = GoogleDriveService(_appendLog);
+      }
 
-      final patchBody = json.encode({
-        'files': {
-          'registry.json': {'content': json.encode(registry)},
-        },
-      });
+      await _appendLog('Downloading from Google Drive...');
+      final file = await _driveService!.downloadFile(fileId, savePath);
 
-      final patchResp = await http.patch(
-        gistApi,
-        headers: {
-          'Authorization': 'token $token',
-          'Content-Type': 'application/json',
-        },
-        body: patchBody,
-      );
-      return patchResp.statusCode >= 200 && patchResp.statusCode < 300;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  Future<String?> fetchUrlFromRegistry(String id) async {
-    final gistId = gistIdSetting;
-    if (gistId == null || gistId.isEmpty) return null;
-    final gistApi = Uri.parse('https://api.github.com/gists/$gistId');
-    try {
-      final resp = await http.get(gistApi);
-      if (resp.statusCode != 200) return null;
-      final data = json.decode(resp.body) as Map<String, dynamic>;
-      final files = data['files'] as Map<String, dynamic>;
-      final registryContent = files['registry.json']?['content'] ?? '{}';
-      final registry = json.decode(registryContent) as Map<String, dynamic>;
-      final entry = registry[id];
-      if (entry == null) return null;
-      return entry['url'] as String?;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  Future<File?> downloadUrlToTemp(String url) async {
-    try {
-      final resp = await http.get(Uri.parse(url));
-      if (resp.statusCode != 200) return null;
-      final tmp = File(p.join(Directory.systemTemp.path, p.basename(url)));
-      await tmp.writeAsBytes(resp.bodyBytes);
-      return tmp;
-    } catch (e) {
-      await _appendLog('downloadUrlToTemp error: $e');
+      return file;
+    } catch (e, st) {
+      await _appendLog('Google Drive download error: $e\n$st');
       return null;
     }
   }
@@ -815,7 +591,7 @@ class _HomePageState extends State<HomePage> {
     return null;
   }
 
-  Future<bool> _checkNetwork({String host = 'filebin.net'}) async {
+  Future<bool> _checkNetwork({String host = 'www.google.com'}) async {
     try {
       final res = await InternetAddress.lookup(
         host,
@@ -1084,16 +860,16 @@ class _HomePageState extends State<HomePage> {
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(
         const SnackBar(
-          content: Text('Uploading to filebin.net...'),
+          content: Text('Uploading to Google Drive...'),
           duration: Duration(seconds: 120),
         ),
       );
       setState(() => isWorking = true);
       // quick network check to provide clearer feedback before attempting upload
-      final netOk = await _checkNetwork(host: 'filebin.net');
+      final netOk = await _checkNetwork(host: 'www.google.com');
       if (!netOk) {
         final err =
-            'Network unreachable: could not resolve filebin.net (check internet connection, firewall, or proxy).';
+            'Network unreachable: could not connect to the internet (check internet connection, firewall, or proxy).';
         await _appendLog('Upload network check failed: $err');
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
@@ -1121,10 +897,10 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final uploadResult = await uploadToFilebin(zip);
+      final uploadResult = await uploadToDrive(zip);
       setState(() => isWorking = false);
 
-      if (uploadResult == null || uploadResult['url'] == null) {
+      if (uploadResult == null || uploadResult['fileId'] == null) {
         final err = uploadResult?['error'] ?? 'Upload failed (unknown error)';
         await _appendLog('Upload failed for ${zip.path}: $err');
         messenger.hideCurrentSnackBar();
@@ -1160,35 +936,20 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final url = uploadResult['url']!;
-      final expires = uploadResult['expires'];
+      final fileId = uploadResult['fileId']!;
+      final fileName = uploadResult['fileName'] ?? 'backup.zip';
 
-      await _appendLog('Upload result URL: $url (expires: $expires)');
+      await _appendLog('Upload successful! File ID: $fileId');
 
-      // attempt to update registry (best-effort)
-      final did = await updateRegistryOnGithub(
-        syncId ?? '',
-        url,
-        expires: expires,
-        provider: 'filebin',
-        extra: (uploadResult['bin'] ?? ''),
-      );
-      await _appendLog(
-        'Registry update for ${syncId ?? ''}: ${did ? 'ok' : 'failed'}',
-      );
-
-      // show the result and copy url to clipboard for convenience
-      await Clipboard.setData(ClipboardData(text: url));
+      // Copy file ID to clipboard for convenience
+      await Clipboard.setData(ClipboardData(text: fileId));
       if (!mounted) return;
-      final msg = did
-          ? 'Upload succeeded and registry updated. URL copied to clipboard.'
-          : 'Upload succeeded. URL copied to clipboard.';
+      final msg = 'Upload succeeded! File ID copied to clipboard.';
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(content: Text(msg)));
 
-      // show dialog with link and copy/open actions + expiry note
+      // show dialog with file info
       if (!mounted) return;
-      final binUrl = 'https://filebin.net/${uploadResult['bin'] ?? ''}';
       showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -1197,90 +958,36 @@ class _HomePageState extends State<HomePage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('File Link:'),
-              SelectableText(url),
-              const SizedBox(height: 12),
-              const Text('Bin Page:'),
-              SelectableText(binUrl),
+              const Text('File uploaded to Google Drive:'),
               const SizedBox(height: 8),
-              Text(
-                expires != null
-                    ? 'Note: link metadata: $expires'
-                    : 'Note: filebin links are temporary and may expire',
+              const Text(
+                'File Name:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SelectableText(fileName),
+              const SizedBox(height: 8),
+              const Text(
+                'File ID:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SelectableText(fileId),
+              const SizedBox(height: 12),
+              const Text(
+                'Your backup is stored in the "WaddonSync Backups" folder in Google Drive.',
+                style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
               ),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: url));
+                await Clipboard.setData(ClipboardData(text: fileId));
                 if (!mounted) return;
-                Navigator.of(context).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('File ID copied to clipboard')),
+                );
               },
-              child: const Text('Copy File Link'),
-            ),
-            TextButton(
-              onPressed: () async {
-                await Process.run('rundll32', [
-                  'url.dll,FileProtocolHandler',
-                  url,
-                ]);
-                if (!mounted) return;
-                Navigator.of(context).pop();
-              },
-              child: const Text('Open File'),
-            ),
-            TextButton(
-              onPressed: () async {
-                // Check file availability first
-                try {
-                  final resp = await http
-                      .get(Uri.parse(url))
-                      .timeout(const Duration(seconds: 10));
-                  final message = 'File URL HTTP ${resp.statusCode}';
-                  if (!mounted) return;
-                  showDialog<void>(
-                    context: context,
-                    builder: (dctx) => AlertDialog(
-                      title: const Text('Availability check'),
-                      content: Text(message),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(dctx).pop(),
-                          child: const Text('OK'),
-                        ),
-                      ],
-                    ),
-                  );
-                } catch (e) {
-                  if (!mounted) return;
-                  showDialog<void>(
-                    context: context,
-                    builder: (dctx) => AlertDialog(
-                      title: const Text('Availability check'),
-                      content: Text('Check failed: $e'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(dctx).pop(),
-                          child: const Text('OK'),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-              },
-              child: const Text('Check availability'),
-            ),
-            TextButton(
-              onPressed: () async {
-                await Process.run('rundll32', [
-                  'url.dll,FileProtocolHandler',
-                  binUrl,
-                ]);
-                if (!mounted) return;
-                Navigator.of(context).pop();
-              },
-              child: const Text('View Bin'),
+              child: const Text('Copy File ID'),
             ),
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
@@ -1290,76 +997,75 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     } catch (e) {
-      await _appendLog('Error while uploading/registering: $e');
+      await _appendLog('Error while uploading: $e');
       setState(() => isWorking = false);
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
-  Future<void> handleSyncById(String id) async {
-    if (id.isEmpty) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Fetching registry...')));
-    final url = await fetchUrlFromRegistry(id);
-    if (url == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No entry found for that ID.')),
-      );
-      return;
-    }
-    final file = await downloadUrlToTemp(url);
-    if (file == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Failed to download file.')));
-      return;
-    }
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('Downloaded to ${file.path}')));
-  }
-
-  void _onAdminPressed() {
-    // Show a single password dialog and ensure the controller is cleared on cancel/success.
+  void _showGoogleDriveSettings() {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Admin unlock'),
-        content: TextField(
-          controller: adminPasswordController,
-          decoration: const InputDecoration(hintText: 'Enter admin password'),
-          obscureText: true,
+        title: const Text('Google Drive Settings'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Your backups are stored in a "WaddonSync Backups" folder in your Google Drive.',
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'The app keeps your 3 most recent backups.',
+              style: TextStyle(fontStyle: FontStyle.italic, fontSize: 12),
+            ),
+          ],
         ),
         actions: [
           TextButton(
-            onPressed: () {
-              adminPasswordController.clear();
+            onPressed: () async {
               Navigator.of(ctx).pop();
-            },
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              final p = adminPasswordController.text;
-              if (_verifyAdminPassword(p)) {
-                setState(() => adminUnlocked = true);
-                adminPasswordController.clear();
-                Navigator.of(ctx).pop();
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('Admin unlocked')));
-              } else {
+
+              // Log out from Google Drive
+              if (_driveService != null) {
+                await _driveService!.logout();
+                if (!mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Invalid password')),
+                  const SnackBar(content: Text('Logged out from Google Drive')),
                 );
               }
             },
-            child: const Text('Unlock'),
+            child: const Text('Logout'),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+
+              // Re-authenticate with Google Drive
+              if (_driveService != null) {
+                await _driveService!.logout();
+              }
+              _driveService = GoogleDriveService(_appendLog);
+              final success = await _driveService!.initialize();
+
+              if (!mounted) return;
+              if (success) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Google Drive authenticated')),
+                );
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Failed to authenticate')),
+                );
+              }
+            },
+            child: const Text('Re-authenticate'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
           ),
         ],
       ),
@@ -1378,6 +1084,11 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Google Drive Settings',
+            icon: const Icon(Icons.cloud),
+            onPressed: _showGoogleDriveSettings,
+          ),
           IconButton(
             tooltip: 'Live log',
             icon: const Icon(Icons.bug_report),
@@ -1595,299 +1306,10 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
 
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Sync ID',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(child: Text(syncId ?? 'Generating...')),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: () async {
-                          if (syncId == null) return;
-                          final messenger = ScaffoldMessenger.of(context);
-                          await Clipboard.setData(ClipboardData(text: syncId!));
-                          if (!mounted) return;
-                          messenger.showSnackBar(
-                            const SnackBar(
-                              content: Text('Sync ID copied to clipboard'),
-                            ),
-                          );
-                        },
-                        child: const Text('Copy'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: () async {
-                          final newId = _generateSyncId(16);
-                          final messenger = ScaffoldMessenger.of(context);
-                          await _saveSyncId(newId);
-                          if (!mounted) return;
-                          messenger.showSnackBar(
-                            const SnackBar(
-                              content: Text('New Sync ID generated'),
-                            ),
-                          );
-                        },
-                        child: const Text('Regenerate'),
-                      ),
-                    ],
-                  ),
-
                   const SizedBox(height: 12),
                   const Text(
-                    'Sync by ID',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: syncIdController,
-                          decoration: const InputDecoration(
-                            hintText: 'Enter Sync ID',
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: () =>
-                            handleSyncById(syncIdController.text.trim()),
-                        child: const Text('Download'),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 12),
-                  Builder(
-                    builder: (ctx) {
-                      if (adminUnlocked) {
-                        return ExpansionTile(
-                          title: const Text('Registry (GitHub Gist) — Admin'),
-                          childrenPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          children: [
-                            TextField(
-                              decoration: const InputDecoration(
-                                labelText: 'Gist ID (registry.json)',
-                              ),
-                              controller: TextEditingController(
-                                text: gistIdSetting ?? '',
-                              ),
-                              onChanged: (v) => gistIdSetting = v.trim(),
-                            ),
-                            const SizedBox(height: 8),
-                            TextField(
-                              decoration: const InputDecoration(
-                                labelText:
-                                    'GitHub token (optional, gist scope)',
-                              ),
-                              controller: TextEditingController(
-                                text: githubTokenSetting ?? '',
-                              ),
-                              onChanged: (v) => githubTokenSetting = v.trim(),
-                              obscureText: true,
-                            ),
-                            const SizedBox(height: 8),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    decoration: const InputDecoration(
-                                      labelText: 'Filebin bin name (optional)',
-                                    ),
-                                    controller: TextEditingController(
-                                      text: filebinBinSetting ?? '',
-                                    ),
-                                    onChanged: (v) =>
-                                        filebinBinSetting = v.trim(),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                ElevatedButton(
-                                  onPressed: () {
-                                    final gen = 'wowui-${_generateSyncId(8)}';
-                                    setState(() => filebinBinSetting = gen);
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text('Generated bin: $gen'),
-                                      ),
-                                    );
-                                  },
-                                  child: const Text('Generate'),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                ElevatedButton(
-                                  onPressed: _saveSettings,
-                                  child: const Text('Save'),
-                                ),
-                                const SizedBox(width: 8),
-                                ElevatedButton(
-                                  onPressed: () async {
-                                    final messenger = ScaffoldMessenger.of(
-                                      context,
-                                    );
-                                    // create a new gist if token provided
-                                    if (githubTokenSetting == null ||
-                                        githubTokenSetting!.isEmpty) {
-                                      if (!mounted) return;
-                                      messenger.showSnackBar(
-                                        const SnackBar(
-                                          content: Text(
-                                            'GitHub token required to create a gist',
-                                          ),
-                                        ),
-                                      );
-                                      return;
-                                    }
-                                    final id = await createRegistryGist(
-                                      githubTokenSetting!,
-                                    );
-                                    if (id == null) {
-                                      if (!mounted) return;
-                                      messenger.showSnackBar(
-                                        const SnackBar(
-                                          content: Text(
-                                            'Failed to create gist',
-                                          ),
-                                        ),
-                                      );
-                                      return;
-                                    }
-                                    // Use the state context after awaiting the create call
-                                    if (!mounted) return;
-                                    setState(() => gistIdSetting = id);
-                                    await _saveSettings();
-                                    if (!mounted) return;
-                                    messenger.showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Gist created and saved'),
-                                      ),
-                                    );
-                                  },
-                                  child: const Text('Create gist'),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: TextField(
-                                    controller: newAdminPasswordController,
-                                    decoration: const InputDecoration(
-                                      labelText: 'New Admin password',
-                                    ),
-                                    obscureText: true,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                ElevatedButton(
-                                  onPressed: () {
-                                    final p = newAdminPasswordController.text;
-                                    if (p.isEmpty) {
-                                      if (!mounted) return;
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        const SnackBar(
-                                          content: Text(
-                                            'Password cannot be empty',
-                                          ),
-                                        ),
-                                      );
-                                      return;
-                                    }
-                                    _setAdminPassword(p);
-                                    newAdminPasswordController.clear();
-                                    if (!mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Admin password updated'),
-                                      ),
-                                    );
-                                  },
-                                  child: const Text('Set admin password'),
-                                ),
-                                const SizedBox(width: 8),
-                                ElevatedButton(
-                                  onPressed: () async {
-                                    // test fetch
-                                    if (gistIdSetting == null ||
-                                        gistIdSetting!.isEmpty) {
-                                      ScaffoldMessenger.of(ctx).showSnackBar(
-                                        const SnackBar(
-                                          content: Text('Set Gist ID first'),
-                                        ),
-                                      );
-                                      return;
-                                    }
-                                    final messenger = ScaffoldMessenger.of(
-                                      context,
-                                    );
-                                    final url = await fetchUrlFromRegistry(
-                                      syncId ?? '',
-                                    );
-                                    if (url == null) {
-                                      if (!mounted) return;
-                                      messenger.showSnackBar(
-                                        const SnackBar(
-                                          content: Text(
-                                            'No registry entry found for current Sync ID',
-                                          ),
-                                        ),
-                                      );
-                                    } else {
-                                      if (!mounted) return;
-                                      messenger.showSnackBar(
-                                        SnackBar(
-                                          content: Text('Found URL: $url'),
-                                        ),
-                                      );
-                                    }
-                                  },
-                                  child: const Text('Test fetch'),
-                                ),
-                                const SizedBox(width: 8),
-                                ElevatedButton(
-                                  onPressed: () async {
-                                    setState(() => adminUnlocked = false);
-                                    ScaffoldMessenger.of(ctx).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Admin locked'),
-                                      ),
-                                    );
-                                  },
-                                  child: const Text('Lock'),
-                                ),
-                              ],
-                            ),
-                          ],
-                        );
-                      }
-
-                      final cfgText =
-                          (gistIdSetting != null && gistIdSetting!.isNotEmpty)
-                          ? 'Registry configured'
-                          : 'Registry not configured';
-                      return Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(cfgText),
-                          ElevatedButton(
-                            onPressed: () => _onAdminPressed(),
-                            child: const Text('Admin'),
-                          ),
-                        ],
-                      );
-                    },
+                    'Backups are automatically stored in your Google Drive',
+                    style: TextStyle(fontStyle: FontStyle.italic),
                   ),
                 ],
               ),
