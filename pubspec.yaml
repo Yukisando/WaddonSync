@@ -43,11 +43,17 @@ dependencies:
 
   # Path helpers
   path: ^1.8.3
-  http: ^0.13.6
+  http: ^1.2.0
   crypto: ^3.0.2
 
   # Cross-platform common APIs (not strictly required yet but useful)
   path_provider: ^2.0.15
+  
+  # Google OAuth 2.0 and Drive API
+  googleapis: ^13.2.0
+  googleapis_auth: ^1.6.0
+  url_launcher: ^6.3.1
+  flutter_secure_storage: ^9.2.2
 
 
 
