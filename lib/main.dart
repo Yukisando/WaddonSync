@@ -205,14 +205,16 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  String? wtfPath;
-  String? interfacePath;
+  String? wowRootPath;
   String? lastZipPath;
 
   bool isWorking = false;
 
-  // Use native Windows Explorer copy UI when restoring (shows OS dialogs)
-  bool useExplorerCopy = Platform.isWindows;
+  // Derived paths
+  String? get wtfPath =>
+      wowRootPath != null ? p.join(wowRootPath!, 'WTF') : null;
+  String? get interfacePath =>
+      wowRootPath != null ? p.join(wowRootPath!, 'Interface') : null;
 
   // Backup options
   bool includeSavedVars = true;
@@ -288,24 +290,11 @@ class _HomePageState extends State<HomePage> {
       final wowRetail = p.join(base, 'World of Warcraft');
       final wowRetailRetail = p.join(base, 'World of Warcraft', '_retail_');
       if (Directory(wowRetail).existsSync()) {
-        final wtf = p.join(wowRetail, 'WTF');
-        final iface = p.join(wowRetail, 'Interface');
-        if (Directory(wtf).existsSync()) {
-          setState(() => wtfPath ??= wtf);
-        }
-        if (Directory(iface).existsSync()) {
-          setState(() => interfacePath ??= iface);
-        }
+        // Use the WoW root when found
+        setState(() => wowRootPath ??= wowRetail);
       }
       if (Directory(wowRetailRetail).existsSync()) {
-        final wtf = p.join(wowRetailRetail, 'WTF');
-        final iface = p.join(wowRetailRetail, 'Interface');
-        if (Directory(wtf).existsSync()) {
-          setState(() => wtfPath ??= wtf);
-        }
-        if (Directory(iface).existsSync()) {
-          setState(() => interfacePath ??= iface);
-        }
+        setState(() => wowRootPath ??= wowRetailRetail);
       }
     }
   }
@@ -365,7 +354,7 @@ class _HomePageState extends State<HomePage> {
         includeBindings = (m['includeBindings'] as bool?) ?? includeBindings;
         includeInterface = (m['includeInterface'] as bool?) ?? includeInterface;
         excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
-        useExplorerCopy = (m['useExplorerCopy'] as bool?) ?? useExplorerCopy;
+        wowRootPath = (m['wowRootPath'] as String?) ?? wowRootPath;
       });
     } catch (e) {
       // ignore
@@ -381,7 +370,7 @@ class _HomePageState extends State<HomePage> {
         'includeBindings': includeBindings,
         'includeInterface': includeInterface,
         'excludeCaches': excludeCaches,
-        'useExplorerCopy': useExplorerCopy,
+        'wowRootPath': wowRootPath,
       };
       await f.writeAsString(json.encode(obj));
       if (!mounted) return;
@@ -608,18 +597,11 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> pickWtfFolder() async {
+  Future<void> pickWowRootFolder() async {
     final result = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Select WTF folder',
+      dialogTitle: 'Select World of Warcraft root folder',
     );
-    if (result != null) setState(() => wtfPath = result);
-  }
-
-  Future<void> pickInterfaceFolder() async {
-    final result = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Select Interface folder',
-    );
-    if (result != null) setState(() => interfacePath = result);
+    if (result != null) setState(() => wowRootPath = result);
   }
 
   Future<File> createZip({
@@ -770,7 +752,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> handleCreateZip() async {
-    if (wtfPath == null || interfacePath == null) return;
+    if (wowRootPath == null) return;
     try {
       final messenger = ScaffoldMessenger.of(context);
       messenger.showSnackBar(
@@ -804,7 +786,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> handleUploadAndRegister() async {
-    if (wtfPath == null || interfacePath == null) return;
+    if (wowRootPath == null) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
       // make the user aware we are zipping first
@@ -1020,7 +1002,7 @@ class _HomePageState extends State<HomePage> {
             const Text(
               'Your backups are stored in a "WaddonSync Backups" folder in your Google Drive.',
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
             const Text(
               'The app keeps your 3 most recent backups.',
               style: TextStyle(fontStyle: FontStyle.italic, fontSize: 12),
@@ -1121,15 +1103,15 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      if (wtfPath == null || interfacePath == null) {
+      if (wowRootPath == null) {
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
         showDialog<void>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Missing folders'),
+            title: const Text('Missing folder'),
             content: const Text(
-              'Please select your WTF and Interface folders before restoring.',
+              'Please select your World of Warcraft root folder before restoring.',
             ),
             actions: [
               TextButton(
@@ -1182,8 +1164,9 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final tempPath = p.join(Directory.systemTemp.path, fileName);
-      final file = await downloadFromDrive(fileId, tempPath);
+      // Save the downloaded backup in the app folder so users can inspect it later
+      final outFile = await _getLocalFile(fileName);
+      final file = await downloadFromDrive(fileId, outFile.path);
       if (file == null) {
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
@@ -1194,97 +1177,56 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final extractDir = await Directory.systemTemp.createTemp(
-        'waddonsync_extract_',
-      );
-      await _appendLog('Extracting backup to ${extractDir.path}');
+      // Update local index so Show folder works
+      setState(() => lastZipPath = file.path);
 
-      final extractedOk = await _extractArchive(file, extractDir.path);
-      if (!extractedOk) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Failed to extract archive (unsupported format or 7z not found)',
-            ),
-          ),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      // Ask user to confirm before overwriting existing files
-      final choice = await showDialog<int>(
+      // Ask user if they want to apply the downloaded backup now
+      if (!mounted) return;
+      final apply = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('Replace existing files?'),
-          content: const Text(
-            'This will overwrite your current WTF and Interface folders. Do you want to back them up first?',
+          title: const Text('Backup downloaded'),
+          content: SelectableText(
+            'Downloaded "$fileName" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(ctx).pop(0),
+              onPressed: () => Navigator.of(ctx).pop(false),
               child: const Text('Cancel'),
             ),
             TextButton(
-              onPressed: () => Navigator.of(ctx).pop(1),
-              child: const Text('Replace (no backup)'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(2),
-              child: const Text('Backup & replace'),
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Apply'),
             ),
           ],
         ),
       );
 
-      if (choice != 1 && choice != 2) {
+      if (apply != true) {
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
         messenger.showSnackBar(
-          const SnackBar(content: Text('Restore cancelled')),
+          SnackBar(content: Text('Downloaded to: ${file.path}')),
         );
         setState(() => isWorking = false);
         return;
       }
 
-      if (choice == 2) {
-        await _backupCurrentFolders();
+      // User chose to apply: extract and copy using helper
+      final err = await _applyBackupFile(file);
+      if (err != null) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(
+          SnackBar(content: Text('Failed to apply backup: $err')),
+        );
+        setState(() => isWorking = false);
+        return;
       }
-
-      // Copy contents
-      final wtfSource = Directory(p.join(extractDir.path, 'WTF'));
-      final ifaceSource = Directory(p.join(extractDir.path, 'Interface'));
-
-      if (wtfSource.existsSync()) {
-        await _appendLog('Restoring WTF...');
-        if (useExplorerCopy && Platform.isWindows) {
-          await _copyUsingExplorer(wtfSource, Directory(wtfPath!));
-        } else {
-          await _copyDirectoryContents(wtfSource, Directory(wtfPath!));
-        }
-      }
-
-      if (ifaceSource.existsSync()) {
-        await _appendLog('Restoring Interface...');
-        if (useExplorerCopy && Platform.isWindows) {
-          await _copyUsingExplorer(ifaceSource, Directory(interfacePath!));
-        } else {
-          await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
-        }
-      }
-
-      messenger.hideCurrentSnackBar();
-      if (!mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Restore completed')),
-      );
-      await _appendLog('Restore completed');
     } catch (e, st) {
       await _appendLog('Restore error: $e\n$st');
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -1374,63 +1316,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _backupCurrentFolders() async {
-    try {
-      final appDir = await getApplicationSupportDirectory();
-      final backupBase = Directory(
-        p.join(appDir.path, 'WaddonSync', 'restores'),
-      );
-      if (!await backupBase.exists()) await backupBase.create(recursive: true);
-      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
-      final thisBackup = Directory(p.join(backupBase.path, ts));
-      await thisBackup.create(recursive: true);
-
-      if (wtfPath != null) {
-        final src = Directory(wtfPath!);
-        if (await src.exists()) {
-          final dest = Directory(p.join(thisBackup.path, 'WTF'));
-          await _copyDirectoryContents(src, dest);
-        }
-      }
-
-      if (interfacePath != null) {
-        final src = Directory(interfacePath!);
-        if (await src.exists()) {
-          final dest = Directory(p.join(thisBackup.path, 'Interface'));
-          await _copyDirectoryContents(src, dest);
-        }
-      }
-
-      await _appendLog('Backed up current folders to ${thisBackup.path}');
-    } catch (e, st) {
-      await _appendLog('Failed to backup current folders: $e\n$st');
-    }
-  }
-
-  Future<void> _backupNow() async {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Backing up current folders...'),
-        duration: Duration(seconds: 120),
-      ),
-    );
-    setState(() => isWorking = true);
-    try {
-      await _backupCurrentFolders();
-      messenger.hideCurrentSnackBar();
-      if (!mounted) return;
-      messenger.showSnackBar(const SnackBar(content: Text('Backup completed')));
-    } catch (e) {
-      messenger.hideCurrentSnackBar();
-      if (!mounted) return;
-      messenger.showSnackBar(SnackBar(content: Text('Backup failed: $e')));
-    } finally {
-      setState(() => isWorking = false);
-    }
-  }
-
   Future<void> _refreshLocalBackups() async {
     try {
       final appDir = await getApplicationSupportDirectory();
@@ -1461,27 +1346,138 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _copyUsingExplorer(Directory src, Directory dest) async {
-    try {
-      // Use PowerShell to invoke Shell.Application CopyHere which shows the Windows copy UI and overwrite prompts
-      final srcPath = p.normalize(src.path);
-      final destPath = p.normalize(dest.path);
-      final cmd =
-          r"$s=New-Object -ComObject Shell.Application; $src=$s.NameSpace('" +
-          srcPath +
-          r"'); $dst=$s.NameSpace('" +
-          destPath +
-          r"'); if ($src -eq $null -or $dst -eq $null) { exit 1 }; $dst.CopyHere($src.Items());";
-      await _appendLog('Starting Windows Explorer copy UI...');
-      // Start PowerShell and let it run (it will return once the copy is initiated)
-      await Process.run('powershell', ['-NoProfile', '-Command', cmd]);
-      await _appendLog(
-        'Explorer copy initiated (please complete any dialogs if shown)',
+  Future<void> _applyLatestLocal() async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (lastZipPath == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('No local backup available')),
       );
+      return;
+    }
+
+    var filePath = lastZipPath;
+    var file = filePath != null ? File(filePath) : null;
+    if (file == null || !await file.exists()) {
+      // Attempt to refresh local index and retry
+      await _refreshLocalBackups();
+      filePath = lastZipPath;
+      file = filePath != null ? File(filePath) : null;
+      if (file == null || !await file.exists()) {
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Latest backup missing on disk')),
+        );
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    final apply = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Apply latest local backup'),
+        content: const Text(
+          'This will extract and overwrite your World of Warcraft folders (WTF and Interface). All conflicting files/folders will be overwritten. Proceed?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+
+    if (apply != true) return;
+
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Applying latest local backup...')),
+    );
+    setState(() => isWorking = true);
+
+    try {
+      final err = await _applyBackupFile(file);
+      messenger.hideCurrentSnackBar();
+      if (!mounted) return;
+      if (err == null) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Apply completed')),
+        );
+      } else {
+        messenger.showSnackBar(SnackBar(content: Text('Apply failed: $err')));
+      }
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text('Apply error: $e')));
+    } finally {
+      setState(() => isWorking = false);
+    }
+  }
+
+  // Returns null on success, otherwise an error message
+  Future<String?> _applyBackupFile(File archiveFile) async {
+    try {
+      final extractDir = await Directory.systemTemp.createTemp(
+        'waddonsync_extract_',
+      );
+      await _appendLog('Extracting backup to ${extractDir.path}');
+
+      final extractedOk = await _extractArchive(archiveFile, extractDir.path);
+      if (!extractedOk) {
+        await _appendLog('Extraction failed');
+        return 'Failed to extract archive (unsupported format or 7z not found).';
+      }
+
+      final wtfSource = Directory(p.join(extractDir.path, 'WTF'));
+      final ifaceSource = Directory(p.join(extractDir.path, 'Interface'));
+
+      final bool wtfHasFiles =
+          wtfSource.existsSync() &&
+          wtfSource
+              .listSync(recursive: true, followLinks: false)
+              .any((e) => e is File);
+      final bool ifaceHasFiles =
+          ifaceSource.existsSync() &&
+          ifaceSource
+              .listSync(recursive: true, followLinks: false)
+              .any((e) => e is File);
+
+      if (!wtfHasFiles && !ifaceHasFiles) {
+        await _appendLog('Backup contains no files to restore');
+        return 'Backup contains no files to restore.';
+      }
+
+      if (wtfHasFiles) {
+        await _appendLog('Applying WTF...');
+        try {
+          await _copyDirectoryContents(wtfSource, Directory(wtfPath!));
+        } catch (e, st) {
+          await _appendLog('Failed copying WTF: $e\n$st');
+          return 'Failed to copy WTF files: $e';
+        }
+      }
+
+      if (ifaceHasFiles) {
+        await _appendLog('Applying Interface...');
+        try {
+          await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
+        } catch (e, st) {
+          await _appendLog('Failed copying Interface: $e\n$st');
+          return 'Failed to copy Interface files: $e';
+        }
+      }
+
+      await _appendLog('Apply completed');
+      return null;
     } catch (e, st) {
-      await _appendLog('Explorer copy error: $e\n$st');
-      // fallback to programmatic copy
-      await _copyDirectoryContents(src, dest);
+      await _appendLog('Apply backup failed: $e\n$st');
+      return 'Unexpected error: $e';
     }
   }
 
@@ -1589,37 +1585,73 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Select source folders (Windows)',
+                    'World of Warcraft folder (Windows)',
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
                       Expanded(
-                        child: Text(wtfPath ?? 'WTF folder not selected'),
+                        child: Text(
+                          wowRootPath ?? 'World of Warcraft root not selected',
+                        ),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
                       ElevatedButton(
-                        onPressed: pickWtfFolder,
-                        child: const Text('Select WTF'),
+                        onPressed: pickWowRootFolder,
+                        child: const Text('Select WoW root'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: (wowRootPath != null)
+                            ? () async {
+                                await Process.run('explorer', [
+                                  p.normalize(wowRootPath!),
+                                ]);
+                              }
+                            : null,
+                        child: const Text('Open WoW folder'),
                       ),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          interfacePath ?? 'Interface folder not selected',
+                  if (wowRootPath != null) ...[
+                    Row(
+                      children: [
+                        Expanded(child: Text('WTF: ${wtfPath ?? 'missing'}')),
+                        if (wtfPath != null)
+                          IconButton(
+                            tooltip: 'Open WTF',
+                            onPressed: () async {
+                              await Process.run('explorer', [
+                                p.normalize(wtfPath!),
+                              ]);
+                            },
+                            icon: const Icon(Icons.folder_open),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Interface: ${interfacePath ?? 'missing'}',
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      ElevatedButton(
-                        onPressed: pickInterfaceFolder,
-                        child: const Text('Select Interface'),
-                      ),
-                    ],
-                  ),
+                        if (interfacePath != null)
+                          IconButton(
+                            tooltip: 'Open Interface',
+                            onPressed: () async {
+                              await Process.run('explorer', [
+                                p.normalize(interfacePath!),
+                              ]);
+                            },
+                            icon: const Icon(Icons.folder_open),
+                          ),
+                      ],
+                    ),
+                  ],
 
                   const SizedBox(height: 20),
 
@@ -1668,11 +1700,9 @@ class _HomePageState extends State<HomePage> {
 
                   Row(
                     children: [
+                      // Primary actions
                       ElevatedButton(
-                        onPressed:
-                            (wtfPath != null &&
-                                interfacePath != null &&
-                                !isWorking)
+                        onPressed: (wowRootPath != null && !isWorking)
                             ? handleCreateZip
                             : null,
                         child: isWorking
@@ -1685,41 +1715,30 @@ class _HomePageState extends State<HomePage> {
                               )
                             : const Text('Create ZIP'),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
                       ElevatedButton(
                         onPressed: (lastZipPath != null && !isWorking)
                             ? uploadLatestAndRegister
                             : null,
-                        child: isWorking
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Text('Upload latest'),
+                        child: const Text('Upload latest'),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
                       ElevatedButton(
+                        onPressed: (lastZipPath != null && !isWorking)
+                            ? _applyLatestLocal
+                            : null,
+                        child: const Text('Apply latest'),
+                      ),
+
+                      const SizedBox(width: 16),
+
+                      // Secondary actions
+                      OutlinedButton(
                         onPressed: (!isWorking) ? _loadLatestAndApply : null,
-                        child: isWorking
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Text('Load latest'),
+                        child: const Text('Load latest'),
                       ),
                       const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: (!isWorking) ? _backupNow : null,
-                        child: const Text('Backup now'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
+                      OutlinedButton(
                         onPressed: (lastZipPath != null)
                             ? () async {
                                 // reveal and select the file in explorer
@@ -1732,8 +1751,8 @@ class _HomePageState extends State<HomePage> {
                                 } else {
                                   // file missing - refresh local index
                                   await _refreshLocalBackups();
+                                  if (!mounted) return;
                                   if (lastZipPath == null) {
-                                    if (!mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
                                         content: Text(
@@ -1748,7 +1767,7 @@ class _HomePageState extends State<HomePage> {
                         child: const Text('Show folder'),
                       ),
                       const SizedBox(width: 8),
-                      ElevatedButton(
+                      OutlinedButton(
                         onPressed: _refreshLocalBackups,
                         child: const Text('Refresh'),
                       ),
