@@ -44,9 +44,12 @@ dependencies:
   # Path helpers
   path: ^1.8.3
   http: ^0.13.6
+  crypto: ^3.0.2
 
   # Cross-platform common APIs (not strictly required yet but useful)
   path_provider: ^2.0.15
+
+
 
 dev_dependencies:
   flutter_test:
@@ -69,6 +72,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/icon.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
