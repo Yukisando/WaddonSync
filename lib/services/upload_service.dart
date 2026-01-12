@@ -142,9 +142,13 @@ class UploadService {
           final allErr = RegExp(
             r'\b(\d{3})\b',
           ).allMatches(stderrStr.trim()).toList();
-          if (allErr.isNotEmpty) httpCode = int.tryParse(allErr.last.group(1)!);
-          if (httpCode == null && stderrStr.contains('Backend fetch failed'))
+          if (allErr.isNotEmpty) {
+            httpCode = int.tryParse(allErr.last.group(1)!);
+          }
+          if (httpCode == null && stderrStr.contains('Backend fetch failed')) {
             httpCode = 503;
+          }
+          httpCode = 503;
         }
 
         final uploadUrl = 'https://filebin.net/$bin/$name';
@@ -192,8 +196,9 @@ class UploadService {
             await log(
               'Server error (HTTP $httpCode) from curl response, attempt $attempt/$maxAttempts. Retrying in ${delaySec}s...',
             );
-            if (attempt < maxAttempts)
+            if (attempt < maxAttempts) {
               await Future.delayed(Duration(seconds: delaySec));
+            }
             continue;
           }
 

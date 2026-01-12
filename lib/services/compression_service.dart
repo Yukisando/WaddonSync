@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'package:archive/archive.dart';
-import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 class CompressionService {
@@ -136,7 +135,9 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
 
     if (includeConfig) {
       final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync()) copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
+      if (cfg.existsSync()) {
+        copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
+      }
     }
   }
 
@@ -149,8 +150,10 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
       if (entity is File) {
         final rel = p.relative(entity.path, from: interfaceDir);
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        if (excludeCaches && (parts.contains('cache') || parts.contains('wdb')))
+        if (excludeCaches &&
+            (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
+        }
         final store = p.join(
           'Interface',
           p.relative(entity.path, from: interfaceDir),
@@ -224,8 +227,10 @@ List<int> performZip(Map<String, dynamic> args) {
       if (entity is File) {
         final rel = p.relative(entity.path, from: interfaceDir);
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        if (excludeCaches && (parts.contains('cache') || parts.contains('wdb')))
+        if (excludeCaches &&
+            (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
+        }
         final store = p.join(
           'Interface',
           p.relative(entity.path, from: interfaceDir),

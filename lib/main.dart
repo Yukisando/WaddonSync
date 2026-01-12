@@ -79,8 +79,10 @@ List<int> performZip(Map<String, dynamic> args) {
       if (entity is File) {
         final rel = p.relative(entity.path, from: interfaceDir);
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        if (excludeCaches && (parts.contains('cache') || parts.contains('wdb')))
+        if (excludeCaches &&
+            (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
+        }
         final store = p.join(
           'Interface',
           p.relative(entity.path, from: interfaceDir),
@@ -145,7 +147,9 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
 
     if (includeConfig) {
       final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync()) copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
+      if (cfg.existsSync()) {
+        copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
+      }
     }
   }
 
@@ -158,8 +162,10 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
       if (entity is File) {
         final rel = p.relative(entity.path, from: interfaceDir);
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        if (excludeCaches && (parts.contains('cache') || parts.contains('wdb')))
+        if (excludeCaches &&
+            (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
+        }
         final store = p.join(
           'Interface',
           p.relative(entity.path, from: interfaceDir),
@@ -557,161 +563,28 @@ class _HomePageState extends State<HomePage> {
     return {'error': 'transfer.sh disabled; use filebin.net instead'};
   }
 
-  // Test if we can reach filebin.net with a simple HTTP request
-  Future<bool> _testFilebinConnection() async {
-    try {
-      await _appendLog('Testing connection to filebin.net...');
-      final testUri = Uri.parse('https://filebin.net/');
-      final response = await http
-          .get(testUri)
-          .timeout(const Duration(seconds: 10));
-      await _appendLog('Connection test: HTTP ${response.statusCode}');
-      return response.statusCode >= 200 && response.statusCode < 500;
-    } catch (e) {
-      await _appendLog('Connection test failed: $e');
-      return false;
-    }
-  }
-
-  // Upload using curl as fallback (more reliable for large files)
-  Future<Map<String, String?>?> _uploadViacurl(File file, String bin) async {
-    try {
-      final name = p.basename(file.path);
-      final url = 'https://filebin.net/$bin/';
-
-      await _appendLog('Attempting upload via curl...');
-
-      // Use curl with form upload
-      final result = await Process.run('curl', [
-        '-X', 'POST',
-        '-F', 'file=@${file.path}',
-        '--max-time', '600', // 10 minute timeout
-        '--connect-timeout', '30',
-        '-w', '\\n%{http_code}', // Write HTTP code on new line
-        url,
-      ], runInShell: true);
-
-      await _appendLog('curl exit code: ${result.exitCode}');
-      if (result.stdout.toString().isNotEmpty) {
-        await _appendLog('curl output: ${result.stdout}');
-      }
-      if (result.stderr.toString().isNotEmpty) {
-        await _appendLog('curl stderr: ${result.stderr}');
-      }
-
-      if (result.exitCode == 0) {
-        final uploadUrl = 'https://filebin.net/$bin/$name';
-        await _appendLog('curl upload succeeded: $uploadUrl');
-        return {'url': uploadUrl, 'bin': bin};
-      }
-
-      return {
-        'error':
-            'curl failed with exit code ${result.exitCode}: ${result.stderr}',
-      };
-    } catch (e, st) {
-      await _appendLog('curl upload failed: $e\\n$st');
-      return {'error': 'curl not available or failed: $e'};
-    }
-  }
-
-  // Upload to filebin.net via multipart POST to https://filebin.net/<bin>/
+  // Upload to filebin.net via centralized UploadService (handles fallbacks)
   Future<Map<String, String?>?> uploadToFilebin(
     File file, {
     String? bin,
   }) async {
-    http.Client? client;
     final chosenBin =
         bin ??
         (filebinBinSetting?.isNotEmpty == true
             ? filebinBinSetting!
             : 'wowui-${_generateSyncId(8)}');
 
-    try {
-      final name = p.basename(file.path);
-      final uri = Uri.parse('https://filebin.net/$chosenBin/');
-      final fileSize = await file.length();
-      final sizeMB = (fileSize / (1024 * 1024)).toStringAsFixed(2);
-      await _appendLog(
-        'Uploading ${file.path} ($sizeMB MB) to filebin $chosenBin',
-      );
+    // Delegate to UploadService which already implements retries, curl fallback,
+    // server status handling, and verification.
+    final svc = UploadService(_appendLog);
+    final res = await svc.uploadToFilebin(file, chosenBin);
 
-      // Warn if file is very large
-      if (fileSize > 50 * 1024 * 1024) {
-        await _appendLog(
-          'WARNING: File is >50MB. Upload may be slow or fail. Consider uploading smaller backups.',
-        );
-      }
-
-      // Test connection first
-      final canConnect = await _testFilebinConnection();
-      if (!canConnect) {
-        await _appendLog('Connection test failed. Trying curl fallback...');
-        return await UploadService(
-          _appendLog,
-        ).uploadViacurlVerified(file, chosenBin);
-      }
-
-      // Use IOClient for better control
-      client = http.Client();
-      final req = http.MultipartRequest('POST', uri);
-
-      // Use streaming instead of loading entire file into memory
-      final stream = file.openRead();
-      final part = http.MultipartFile('file', stream, fileSize, filename: name);
-      req.files.add(part);
-
-      // Set headers for better upload reliability
-      req.headers['Connection'] = 'keep-alive';
-
-      // Adjust timeout based on file size (20 minutes for large files)
-      final timeout = fileSize > 20 * 1024 * 1024
-          ? const Duration(minutes: 20)
-          : const Duration(minutes: 10);
-
-      await _appendLog(
-        'Starting upload (timeout: ${timeout.inMinutes} min)...',
-      );
-      final streamed = await client
-          .send(req)
-          .timeout(
-            timeout,
-            onTimeout: () {
-              throw TimeoutException(
-                'Upload timed out after ${timeout.inMinutes} minutes. File may be too large.',
-              );
-            },
-          );
-
-      final respBody = await streamed.stream.bytesToString();
-      if (streamed.statusCode >= 200 && streamed.statusCode < 300) {
-        final url = 'https://filebin.net/$chosenBin/$name';
-        await _appendLog('Filebin upload succeeded: $url');
-        return {'url': url, 'bin': chosenBin};
-      }
-      final err =
-          'filebin responded with status ${streamed.statusCode}: $respBody';
-      await _appendLog('Filebin upload failed: $err');
-      return {'error': err};
-    } catch (e, st) {
-      final err = 'Exception during filebin upload: $e\n$st';
-      await _appendLog(err);
-
-      // Try curl as fallback for connection issues
-      if (e.toString().contains('SocketException') ||
-          e.toString().contains('Write failed') ||
-          e.toString().contains('Connection')) {
-        await _appendLog('HTTP client failed. Trying curl fallback...');
-        client?.close();
-        return await UploadService(
-          _appendLog,
-        ).uploadViacurlVerified(file, chosenBin);
-      }
-
-      return {'error': err};
-    } finally {
-      client?.close();
+    if (res == null) return null;
+    // If underlying service returned an error, log it here for consistency
+    if (res['error'] != null) {
+      await _appendLog('UploadService reported: ${res['error']}');
     }
+    return res;
   }
 
   Future<bool> updateRegistryOnGithub(
@@ -813,32 +686,6 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     } catch (e) {
       // best-effort logging only
-    }
-  }
-
-  Future<String> _readLogs({int maxChars = 64 * 1024}) async {
-    try {
-      final f = await _getLogFile();
-      if (!await f.exists()) return '';
-      final s = await f.readAsString();
-      if (s.length <= maxChars) return s;
-      // return last maxChars characters with an indicator
-      return '... (truncated) ...\n${s.substring(s.length - maxChars)}';
-    } catch (e) {
-      return 'Failed to read log: $e';
-    }
-  }
-
-  // Write a provided string to an export log file and return the path
-  Future<String?> _writeLogsToExportFile(String logs) async {
-    try {
-      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
-      final out = await _getLocalFile('app_export_$ts.log');
-      await out.writeAsString(logs, flush: true);
-      return out.path;
-    } catch (e) {
-      await _appendLog('Failed to write export logs: $e');
-      return null;
     }
   }
 
@@ -966,86 +813,6 @@ class _HomePageState extends State<HomePage> {
       await _appendLog('7-Zip exception: $e\n$st');
     }
     return null;
-  }
-
-  // Legacy method - kept for compatibility but no longer used
-  Future<File> _trySevenZipCompression(File zipFile) async {
-    try {
-      final exe = await _find7zipExecutable();
-      if (exe == null) {
-        await _appendLog('7-Zip not found, using standard ZIP compression');
-        return zipFile;
-      }
-
-      await _appendLog('Creating 7z archive with maximum compression...');
-
-      // Prepare a temporary folder with the exact files we want to compress
-      final tempDirPath = await compute(prepareTempDirFor7z, {
-        'wtfDir': wtfPath ?? '',
-        'interfaceDir': interfacePath ?? '',
-        'includeSavedVars': includeSavedVars,
-        'includeConfig': includeConfig,
-        'includeBindings': includeBindings,
-        'includeInterface': includeInterface,
-        'excludeCaches': excludeCaches,
-      });
-
-      if (tempDirPath.isEmpty) return zipFile;
-
-      final outPath = zipFile.path.replaceAll(
-        RegExp(r'\.zip\$', caseSensitive: false),
-        '.7z',
-      );
-
-      // Use ultra compression settings for maximum file size reduction
-      // -t7z: 7z format, -mx=9: ultra compression, -m0=lzma2: best algorithm
-      // -mfb=64: fast bytes, -md=32m: dictionary size, -ms=on: solid archive
-      final proc = await Process.run(exe, [
-        'a',
-        '-t7z',
-        '-mx=9',
-        '-m0=lzma2',
-        '-mfb=64',
-        '-md=32m',
-        '-ms=on',
-        outPath,
-        '.',
-      ], workingDirectory: tempDirPath);
-
-      // Clean up the temp folder regardless of success/failure
-      try {
-        final td = Directory(tempDirPath);
-        if (await td.exists()) await td.delete(recursive: true);
-      } catch (e) {
-        await _appendLog('Failed to cleanup temp dir: $e');
-      }
-
-      if (proc.exitCode == 0) {
-        final outFile = File(outPath);
-        if (await outFile.exists()) {
-          final zipSize = await zipFile.length();
-          final sevenzSize = await outFile.length();
-          final savings = ((zipSize - sevenzSize) / zipSize * 100)
-              .toStringAsFixed(1);
-          try {
-            await zipFile.delete();
-          } catch (e) {
-            await _appendLog('Failed to delete original ZIP: $e');
-          }
-          await _appendLog(
-            '7-Zip created ${outFile.path} (${(sevenzSize / (1024 * 1024)).toStringAsFixed(2)} MB, $savings% smaller than ZIP)',
-          );
-          return outFile;
-        }
-      } else {
-        await _appendLog(
-          '7-Zip failed (exit code ${proc.exitCode}): ${proc.stdout}\n${proc.stderr}',
-        );
-      }
-    } catch (e, st) {
-      await _appendLog('7-Zip exception: $e\n$st');
-    }
-    return zipFile;
   }
 
   Future<bool> _checkNetwork({String host = 'filebin.net'}) async {
