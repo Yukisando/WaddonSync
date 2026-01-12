@@ -1449,6 +1449,7 @@ class _HomePageState extends State<HomePage> {
 
       // show dialog with link and copy/open actions + expiry note
       if (!mounted) return;
+      final binUrl = 'https://filebin.net/${uploadResult['bin'] ?? ''}';
       showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -1457,8 +1458,11 @@ class _HomePageState extends State<HomePage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Link:'),
+              const Text('File Link:'),
               SelectableText(url),
+              const SizedBox(height: 12),
+              const Text('Bin Page:'),
+              SelectableText(binUrl),
               const SizedBox(height: 8),
               Text(
                 expires != null
@@ -1474,7 +1478,7 @@ class _HomePageState extends State<HomePage> {
                 if (!mounted) return;
                 Navigator.of(context).pop();
               },
-              child: const Text('Copy'),
+              child: const Text('Copy File Link'),
             ),
             TextButton(
               onPressed: () async {
@@ -1485,7 +1489,18 @@ class _HomePageState extends State<HomePage> {
                 if (!mounted) return;
                 Navigator.of(context).pop();
               },
-              child: const Text('Open'),
+              child: const Text('Open File'),
+            ),
+            TextButton(
+              onPressed: () async {
+                await Process.run('rundll32', [
+                  'url.dll,FileProtocolHandler',
+                  binUrl,
+                ]);
+                if (!mounted) return;
+                Navigator.of(context).pop();
+              },
+              child: const Text('View Bin'),
             ),
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
