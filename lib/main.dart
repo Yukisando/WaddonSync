@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 
 // Services
 import 'services/google_drive_service.dart';
+import 'services/compression_service.dart';
 
 // Performs the heavy file collection and compression in a separate isolate.
 // Arguments (Map): wtfDir, interfaceDir, includeSavedVars, includeConfig,
@@ -210,6 +211,9 @@ class _HomePageState extends State<HomePage> {
 
   bool isWorking = false;
 
+  // Use native Windows Explorer copy UI when restoring (shows OS dialogs)
+  bool useExplorerCopy = Platform.isWindows;
+
   // Backup options
   bool includeSavedVars = true;
   bool includeConfig = false; // default off
@@ -361,6 +365,7 @@ class _HomePageState extends State<HomePage> {
         includeBindings = (m['includeBindings'] as bool?) ?? includeBindings;
         includeInterface = (m['includeInterface'] as bool?) ?? includeInterface;
         excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
+        useExplorerCopy = (m['useExplorerCopy'] as bool?) ?? useExplorerCopy;
       });
     } catch (e) {
       // ignore
@@ -376,7 +381,8 @@ class _HomePageState extends State<HomePage> {
         'includeBindings': includeBindings,
         'includeInterface': includeInterface,
         'excludeCaches': excludeCaches,
-      };
+        'useExplorerCopy': useExplorerCopy,
+      }; 
       await f.writeAsString(json.encode(obj));
       if (!mounted) return;
       if (showSnack) {
@@ -430,9 +436,7 @@ class _HomePageState extends State<HomePage> {
   // Download from Google Drive
   Future<File?> downloadFromDrive(String fileId, String savePath) async {
     try {
-      if (_driveService == null) {
-        _driveService = GoogleDriveService(_appendLog);
-      }
+      _driveService ??= GoogleDriveService(_appendLog);
 
       await _appendLog('Downloading from Google Drive...');
       final file = await _driveService!.downloadFile(fileId, savePath);
@@ -1072,6 +1076,391 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // --- Restore helpers ---
+  Future<void> _loadLatestAndApply() async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Downloading and restoring latest backup...'),
+        duration: Duration(seconds: 120),
+      ),
+    );
+
+    setState(() => isWorking = true);
+
+    try {
+      // Quick network check
+      final netOk = await _checkNetwork(host: 'www.googleapis.com');
+      if (!netOk) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Network error'),
+            content: const SelectableText(
+              'Network unreachable: could not connect to the internet.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  _loadLatestAndApply();
+                },
+                child: const Text('Retry'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      if (wtfPath == null || interfacePath == null) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Missing folders'),
+            content: const Text(
+              'Please select your WTF and Interface folders before restoring.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      if (_driveService == null) _driveService = GoogleDriveService(_appendLog);
+
+      final initialized = await _driveService!.initialize();
+      if (!initialized) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Failed to initialize Google Drive')),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      final backups = await _driveService!.listBackups();
+      if (backups.isEmpty) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('No backups found in your Google Drive'),
+          ),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      final latest = backups.first;
+      final fileId = latest['fileId'] as String?;
+      final fileName = latest['name'] as String?;
+      if (fileId == null || fileName == null) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Could not identify latest backup')),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      final tempPath = p.join(Directory.systemTemp.path, fileName);
+      final file = await downloadFromDrive(fileId, tempPath);
+      if (file == null) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Failed to download latest backup')),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      final extractDir = await Directory.systemTemp.createTemp(
+        'waddonsync_extract_',
+      );
+      await _appendLog('Extracting backup to ${extractDir.path}');
+
+      final extractedOk = await _extractArchive(file, extractDir.path);
+      if (!extractedOk) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Failed to extract archive (unsupported format or 7z not found)',
+            ),
+          ),
+        );
+        setState(() => isWorking = false);
+        return;
+      }
+
+      // Ask user to confirm before overwriting existing files
+      final choice = await showDialog<int>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Replace existing files?'),
+          content: const Text('This will overwrite your current WTF and Interface folders. Do you want to back them up first?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(0), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.of(ctx).pop(1), child: const Text('Replace (no backup)')),
+            TextButton(onPressed: () => Navigator.of(ctx).pop(2), child: const Text('Backup & replace')),
+          ],
+        ),
+      );
+
+      if (choice != 1 && choice != 2) {
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        messenger.showSnackBar(const SnackBar(content: Text('Restore cancelled')));
+        setState(() => isWorking = false);
+        return;
+      }
+
+      if (choice == 2) {
+        await _backupCurrentFolders();
+      }
+
+      // Copy contents
+      final wtfSource = Directory(p.join(extractDir.path, 'WTF'));
+      final ifaceSource = Directory(p.join(extractDir.path, 'Interface'));
+
+      if (wtfSource.existsSync()) {
+        await _appendLog('Restoring WTF...');
+        if (useExplorerCopy && Platform.isWindows) {
+          await _copyUsingExplorer(wtfSource, Directory(wtfPath!));
+        } else {
+          await _copyDirectoryContents(wtfSource, Directory(wtfPath!));
+        }
+      }
+
+      if (ifaceSource.existsSync()) {
+        await _appendLog('Restoring Interface...');
+        if (useExplorerCopy && Platform.isWindows) {
+          await _copyUsingExplorer(ifaceSource, Directory(interfacePath!));
+        } else {
+          await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
+        }
+      }
+
+      messenger.hideCurrentSnackBar();
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Restore completed')),
+      );
+      await _appendLog('Restore completed');
+    } catch (e, st) {
+      await _appendLog('Restore error: $e\n$st');
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Restore error'),
+          content: SelectableText(e.toString()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      setState(() => isWorking = false);
+    }
+  }
+
+  Future<bool> _extractArchive(File archiveFile, String destPath) async {
+    final ext = p.extension(archiveFile.path).toLowerCase();
+
+    if (ext == '.zip') {
+      try {
+        final bytes = await archiveFile.readAsBytes();
+        final arch = ZipDecoder().decodeBytes(bytes);
+        for (final file in arch) {
+          final outPath = p.join(destPath, file.name);
+          if (file.isFile) {
+            final outFile = File(outPath);
+            outFile.parent.createSync(recursive: true);
+            final content = file.content as List<int>;
+            await outFile.writeAsBytes(content, flush: true);
+          } else {
+            Directory(outPath).createSync(recursive: true);
+          }
+        }
+        return true;
+      } catch (e, st) {
+        await _appendLog('ZIP extraction failed: $e\n$st');
+        return false;
+      }
+    } else if (ext == '.7z') {
+      try {
+        final cs = CompressionService(_appendLog);
+        final exe = await cs.find7zipExecutable();
+        if (exe == null) {
+          await _appendLog('7z executable not found');
+          return false;
+        }
+        final proc = await Process.run(exe, [
+          'x',
+          archiveFile.path,
+          '-o$destPath',
+          '-y',
+        ]);
+        if (proc.exitCode == 0) return true;
+        await _appendLog(
+          '7z extraction failed: ${proc.stdout}\n${proc.stderr}',
+        );
+        return false;
+      } catch (e, st) {
+        await _appendLog('7z extraction error: $e\n$st');
+        return false;
+      }
+    }
+
+    await _appendLog('Unsupported archive format: $ext');
+    return false;
+  }
+
+  Future<void> _copyDirectoryContents(Directory src, Directory dest) async {
+    if (!await dest.exists()) await dest.create(recursive: true);
+
+    await for (final entity in src.list(recursive: true, followLinks: false)) {
+      final rel = p.relative(entity.path, from: src.path);
+      final targetPath = p.join(dest.path, rel);
+
+      if (entity is File) {
+        final targetFile = File(targetPath);
+        if (await targetFile.exists()) await targetFile.delete();
+        await targetFile.parent.create(recursive: true);
+        await entity.copy(targetFile.path);
+      } else if (entity is Directory) {
+        final d = Directory(targetPath);
+        if (!await d.exists()) await d.create(recursive: true);
+      }
+    }
+  }
+
+  Future<void> _backupCurrentFolders() async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final backupBase = Directory(
+        p.join(appDir.path, 'WaddonSync', 'restores'),
+      );
+      if (!await backupBase.exists()) await backupBase.create(recursive: true);
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final thisBackup = Directory(p.join(backupBase.path, ts));
+      await thisBackup.create(recursive: true);
+
+      if (wtfPath != null) {
+        final src = Directory(wtfPath!);
+        if (await src.exists()) {
+          final dest = Directory(p.join(thisBackup.path, 'WTF'));
+          await _copyDirectoryContents(src, dest);
+        }
+      }
+
+      if (interfacePath != null) {
+        final src = Directory(interfacePath!);
+        if (await src.exists()) {
+          final dest = Directory(p.join(thisBackup.path, 'Interface'));
+          await _copyDirectoryContents(src, dest);
+        }
+      }
+
+      await _appendLog('Backed up current folders to ${thisBackup.path}');
+    } catch (e, st) {
+      await _appendLog('Failed to backup current folders: $e\n$st');
+    }
+  }
+
+  Future<void> _backupNow() async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Backing up current folders...'),
+        duration: Duration(seconds: 120),
+      ),
+    );
+    setState(() => isWorking = true);
+    try {
+      await _backupCurrentFolders();
+      messenger.hideCurrentSnackBar();
+      if (!mounted) return;
+      messenger.showSnackBar(const SnackBar(content: Text('Backup completed')));
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text('Backup failed: $e')));
+    } finally {
+      setState(() => isWorking = false);
+    }
+  }
+
+  Future<void> _refreshLocalBackups() async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final folder = Directory(
+        p.join(appDir.parent.path, 'com.waddonsync', 'WaddonSync'),
+      );
+      if (!await folder.exists()) {
+        setState(() => lastZipPath = null);
+        return;
+      }
+      final zips = folder.listSync().whereType<File>().where((f) {
+        final ext = p.extension(f.path).toLowerCase();
+        return ext == '.zip' || ext == '.7z';
+      }).toList();
+      zips.sort((a, b) => b.statSync().modified.compareTo(a.statSync().modified));
+      if (zips.isNotEmpty) {
+        setState(() => lastZipPath = zips.first.path);
+        await _appendLog('Refreshed local backups - newest: ${zips.first.path}');
+      } else {
+        setState(() => lastZipPath = null);
+      }
+    } catch (e, st) {
+      await _appendLog('Failed to refresh local backups: $e\n$st');
+    }
+  }
+
+  Future<void> _copyUsingExplorer(Directory src, Directory dest) async {
+    try {
+      // Use PowerShell to invoke Shell.Application CopyHere which shows the Windows copy UI and overwrite prompts
+      final srcPath = p.normalize(src.path);
+      final destPath = p.normalize(dest.path);
+      final cmd = r"$s=New-Object -ComObject Shell.Application; $src=$s.NameSpace('" + srcPath + r"'); $dst=$s.NameSpace('" + destPath + r"'); if ($src -eq $null -or $dst -eq $null) { exit 1 }; $dst.CopyHere($src.Items());";
+      await _appendLog('Starting Windows Explorer copy UI...');
+      // Start PowerShell and let it run (it will return once the copy is initiated)
+      await Process.run('powershell', ['-NoProfile', '-Command', cmd]);
+      await _appendLog('Explorer copy initiated (please complete any dialogs if shown)');
+    } catch (e, st) {
+      await _appendLog('Explorer copy error: $e\n$st');
+      // fallback to programmatic copy
+      await _copyDirectoryContents(src, dest);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1289,6 +1678,24 @@ class _HomePageState extends State<HomePage> {
                       ),
                       const SizedBox(width: 12),
                       ElevatedButton(
+                        onPressed: (!isWorking) ? _loadLatestAndApply : null,
+                        child: isWorking
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('Load latest'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: (!isWorking) ? _backupNow : null,
+                        child: const Text('Backup now'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
                         onPressed: (lastZipPath != null)
                             ? () async {
                                 // reveal and select the file in explorer
@@ -1298,10 +1705,24 @@ class _HomePageState extends State<HomePage> {
                                     '/select,',
                                     p.normalize(file.path),
                                   ]);
+                                } else {
+                                  // file missing - refresh local index
+                                  await _refreshLocalBackups();
+                                  if (lastZipPath == null) {
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Latest backup not found locally')),
+                                    );
+                                  }
                                 }
                               }
                             : null,
                         child: const Text('Show folder'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: _refreshLocalBackups,
+                        child: const Text('Refresh'),
                       ),
                     ],
                   ),
