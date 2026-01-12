@@ -234,9 +234,12 @@ class _HomePageState extends State<HomePage> {
         }
         // attempt to remove old folder if empty
         try {
-          if (oldFolder.listSync().isEmpty)
+          if (oldFolder.listSync().isEmpty) {
             await oldFolder.delete(recursive: true);
-        } catch (e) {}
+          }
+        } catch (e) {
+          await _appendLog('Failed to remove old folder: $e');
+        }
         final zips = newFolder
             .listSync()
             .whereType<File>()
@@ -283,10 +286,12 @@ class _HomePageState extends State<HomePage> {
         'adminHash': adminHash ?? '',
       };
       await f.writeAsString(json.encode(obj));
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Settings saved')));
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Failed to save settings: $e')));
@@ -343,6 +348,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final url = Uri.parse('https://transfer.sh/${p.basename(file.path)}');
       final bytes = await file.readAsBytes();
+      await _appendLog('Uploading ${file.path} to transfer.sh');
       final resp = await http.put(
         url,
         body: bytes,
@@ -362,11 +368,17 @@ class _HomePageState extends State<HomePage> {
             break;
           }
         }
+        await _appendLog('Upload succeeded: $returned (expires: $expires)');
         return {'url': returned, 'expires': expires};
       }
-      return null;
-    } catch (e) {
-      return null;
+      final err =
+          'transfer.sh responded with status ${resp.statusCode}: ${resp.body}';
+      await _appendLog('Upload failed: $err');
+      return {'error': err};
+    } catch (e, st) {
+      final err = 'Exception during upload: $e\n$st';
+      await _appendLog(err);
+      return {'error': err};
     }
   }
 
@@ -441,8 +453,83 @@ class _HomePageState extends State<HomePage> {
       await tmp.writeAsBytes(resp.bodyBytes);
       return tmp;
     } catch (e) {
+      await _appendLog('downloadUrlToTemp error: $e');
       return null;
     }
+  }
+
+  // Logging helpers: append to a local log file and read logs for UI copy/export
+  Future<File> _getLogFile() async => await _getLocalFile('app.log');
+
+  Future<void> _appendLog(String message) async {
+    try {
+      final f = await _getLogFile();
+      final ts = DateTime.now().toIso8601String();
+      final line = '[$ts] $message\n';
+      await f.writeAsString(line, mode: FileMode.append, flush: true);
+      // Also print to console for convenience
+      // ignore: avoid_print
+      print(line);
+    } catch (e) {
+      // best-effort logging only
+    }
+  }
+
+  Future<String> _readLogs({int maxChars = 64 * 1024}) async {
+    try {
+      final f = await _getLogFile();
+      if (!await f.exists()) return '';
+      final s = await f.readAsString();
+      if (s.length <= maxChars) return s;
+      // return last maxChars characters with an indicator
+      return '... (truncated) ...\n${s.substring(s.length - maxChars)}';
+    } catch (e) {
+      return 'Failed to read log: $e';
+    }
+  }
+
+  void _showLogsDialog() async {
+    final logs = await _readLogs();
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Application logs'),
+        content: SizedBox(
+          width: 600,
+          child: SingleChildScrollView(
+            child: SelectableText(logs.isNotEmpty ? logs : '(no logs)'),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: logs));
+              if (!mounted) return;
+              Navigator.of(context).pop();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Logs copied to clipboard')),
+              );
+            },
+            child: const Text('Copy'),
+          ),
+          TextButton(
+            onPressed: () async {
+              final f = await _getLogFile();
+              if (await f.exists()) {
+                // open containing folder
+                await Process.run('explorer', ['/select,', f.path]);
+              }
+            },
+            child: const Text('Show file'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> pickWtfFolder() async {
@@ -515,8 +602,9 @@ class _HomePageState extends State<HomePage> {
 
       if (includeConfig) {
         final cfg = File(p.join(wtfDir, 'Config.wtf'));
-        if (await cfg.exists())
+        if (await cfg.exists()) {
           await addFileAt(p.join('WTF', 'Config.wtf'), cfg);
+        }
       }
     }
 
@@ -530,8 +618,9 @@ class _HomePageState extends State<HomePage> {
           final rel = p.relative(entity.path, from: interfaceDir);
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
           if (excludeCaches &&
-              (parts.contains('cache') || parts.contains('wdb')))
+              (parts.contains('cache') || parts.contains('wdb'))) {
             continue;
+          }
           final store = p.join(
             'Interface',
             p.relative(entity.path, from: interfaceDir),
@@ -545,6 +634,32 @@ class _HomePageState extends State<HomePage> {
     final zipData = zipEncoder.encode(archive)!;
     await outFile.writeAsBytes(zipData, flush: true);
 
+    // Prune old zip files to keep at most 2 backups
+    try {
+      final appDir = outFile.parent;
+      final zips = appDir
+          .listSync()
+          .whereType<File>()
+          .where((f) => p.extension(f.path).toLowerCase() == '.zip')
+          .toList();
+      zips.sort(
+        (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+      );
+      if (zips.length > 2) {
+        final toDelete = zips.sublist(2);
+        for (final f in toDelete) {
+          try {
+            await f.delete();
+            await _appendLog('Pruned old zip: ${f.path}');
+          } catch (e) {
+            // ignore individual delete failures
+          }
+        }
+      }
+    } catch (e) {
+      await _appendLog('Failed to prune zips: $e');
+    }
+
     setState(() {
       lastZipPath = outFile.path;
       isWorking = false;
@@ -556,7 +671,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> handleCreateZip() async {
     if (wtfPath == null || interfacePath == null) return;
     try {
-      ScaffoldMessenger.of(context).showSnackBar(
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showSnackBar(
         const SnackBar(
           content: Text('Zipping...'),
           duration: Duration(seconds: 30),
@@ -577,6 +693,8 @@ class _HomePageState extends State<HomePage> {
         context,
       ).showSnackBar(SnackBar(content: Text('Backup created: ${zip.path}')));
     } catch (e) {
+      await _appendLog('Error while zipping: $e');
+      if (!mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(
         context,
@@ -586,9 +704,10 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> handleUploadAndRegister() async {
     if (wtfPath == null || interfacePath == null) return;
+    final messenger = ScaffoldMessenger.of(context);
     try {
       // make the user aware we are zipping first
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         const SnackBar(
           content: Text('Zipping...'),
           duration: Duration(seconds: 30),
@@ -605,9 +724,44 @@ class _HomePageState extends State<HomePage> {
       );
       if (!mounted) return;
 
+      // after creating a zip, upload it (shared logic)
+      await uploadFileAndRegister(zip);
+    } catch (e) {
+      await _appendLog('Error while uploading/registering: $e');
+      setState(() => isWorking = false);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> uploadLatestAndRegister() async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (lastZipPath == null) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('No ZIP available. Create a ZIP first.')),
+      );
+      return;
+    }
+    final f = File(lastZipPath!);
+    if (!await f.exists()) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Latest ZIP is missing. Please create a ZIP.'),
+        ),
+      );
+      return;
+    }
+    await uploadFileAndRegister(f);
+  }
+
+  Future<void> uploadFileAndRegister(File zip) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
       // start uploading
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
         const SnackBar(
           content: Text('Uploading to transfer.sh...'),
           duration: Duration(seconds: 120),
@@ -616,16 +770,47 @@ class _HomePageState extends State<HomePage> {
       setState(() => isWorking = true);
       final uploadResult = await uploadToTransferSh(zip);
       setState(() => isWorking = false);
+
       if (uploadResult == null || uploadResult['url'] == null) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Upload failed.')));
+        final err = uploadResult?['error'] ?? 'Upload failed (unknown error)';
+        await _appendLog('Upload failed for ${zip.path}: $err');
+        messenger.hideCurrentSnackBar();
+        if (!mounted) return;
+        showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Upload failed'),
+            content: SelectableText(err),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: err));
+                  if (!mounted) return;
+                  Navigator.of(context).pop();
+                },
+                child: const Text('Copy error'),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  _showLogsDialog();
+                },
+                child: const Text('View logs'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        );
         return;
       }
 
       final url = uploadResult['url']!;
       final expires = uploadResult['expires'];
+
+      await _appendLog('Upload result URL: $url (expires: $expires)');
 
       // attempt to update registry (best-effort)
       final did = await updateRegistryOnGithub(
@@ -633,14 +818,18 @@ class _HomePageState extends State<HomePage> {
         url,
         expires: expires,
       );
+      await _appendLog(
+        'Registry update for ${syncId ?? ''}: ${did ? 'ok' : 'failed'}',
+      );
 
       // show the result and copy url to clipboard for convenience
       await Clipboard.setData(ClipboardData(text: url));
+      if (!mounted) return;
       final msg = did
           ? 'Upload succeeded and registry updated. URL copied to clipboard.'
           : 'Upload succeeded. URL copied to clipboard.';
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
 
       // show dialog with link and copy/open actions + expiry note
       if (!mounted) return;
@@ -666,7 +855,8 @@ class _HomePageState extends State<HomePage> {
             TextButton(
               onPressed: () async {
                 await Clipboard.setData(ClipboardData(text: url));
-                Navigator.of(ctx).pop();
+                if (!mounted) return;
+                Navigator.of(context).pop();
               },
               child: const Text('Copy'),
             ),
@@ -676,7 +866,8 @@ class _HomePageState extends State<HomePage> {
                   'url.dll,FileProtocolHandler',
                   url,
                 ]);
-                Navigator.of(ctx).pop();
+                if (!mounted) return;
+                Navigator.of(context).pop();
               },
               child: const Text('Open'),
             ),
@@ -688,11 +879,10 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     } catch (e) {
+      await _appendLog('Error while uploading/registering: $e');
       setState(() => isWorking = false);
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
     }
   }
 
@@ -703,18 +893,21 @@ class _HomePageState extends State<HomePage> {
     ).showSnackBar(const SnackBar(content: Text('Fetching registry...')));
     final url = await fetchUrlFromRegistry(id);
     if (url == null) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No entry found for that ID.')),
       );
       return;
     }
-    final file = await downloadUrlToTemp(url!);
+    final file = await downloadUrlToTemp(url);
     if (file == null) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Failed to download file.')));
       return;
     }
+    if (!mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Downloaded to ${file.path}')));
@@ -775,9 +968,9 @@ class _HomePageState extends State<HomePage> {
         ),
         actions: [
           IconButton(
-            tooltip: 'Admin',
-            icon: const Icon(Icons.settings),
-            onPressed: () => _onAdminPressed(),
+            tooltip: 'Logs',
+            icon: const Icon(Icons.bug_report),
+            onPressed: () => _showLogsDialog(),
           ),
         ],
       ),
@@ -868,9 +1061,8 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton(
-                    onPressed:
-                        (wtfPath != null && interfacePath != null && !isWorking)
-                        ? handleUploadAndRegister
+                    onPressed: (lastZipPath != null && !isWorking)
+                        ? uploadLatestAndRegister
                         : null,
                     child: isWorking
                         ? const SizedBox(
@@ -878,7 +1070,7 @@ class _HomePageState extends State<HomePage> {
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Save & Upload'),
+                        : const Text('Upload latest'),
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton(
@@ -912,8 +1104,10 @@ class _HomePageState extends State<HomePage> {
                   ElevatedButton(
                     onPressed: () async {
                       if (syncId == null) return;
+                      final messenger = ScaffoldMessenger.of(context);
                       await Clipboard.setData(ClipboardData(text: syncId!));
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      if (!mounted) return;
+                      messenger.showSnackBar(
                         const SnackBar(
                           content: Text('Sync ID copied to clipboard'),
                         ),
@@ -925,8 +1119,10 @@ class _HomePageState extends State<HomePage> {
                   ElevatedButton(
                     onPressed: () async {
                       final newId = _generateSyncId(16);
+                      final messenger = ScaffoldMessenger.of(context);
                       await _saveSyncId(newId);
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      if (!mounted) return;
+                      messenger.showSnackBar(
                         const SnackBar(content: Text('New Sync ID generated')),
                       );
                     },
@@ -1001,10 +1197,12 @@ class _HomePageState extends State<HomePage> {
                             const SizedBox(width: 8),
                             ElevatedButton(
                               onPressed: () async {
+                                final messenger = ScaffoldMessenger.of(context);
                                 // create a new gist if token provided
                                 if (githubTokenSetting == null ||
                                     githubTokenSetting!.isEmpty) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text(
                                         'GitHub token required to create a gist',
@@ -1017,22 +1215,60 @@ class _HomePageState extends State<HomePage> {
                                   githubTokenSetting!,
                                 );
                                 if (id == null) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text('Failed to create gist'),
                                     ),
                                   );
                                   return;
                                 }
+                                // Use the state context after awaiting the create call
+                                if (!mounted) return;
                                 setState(() => gistIdSetting = id);
                                 await _saveSettings();
-                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                if (!mounted) return;
+                                messenger.showSnackBar(
                                   const SnackBar(
                                     content: Text('Gist created and saved'),
                                   ),
                                 );
                               },
                               child: const Text('Create gist'),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: TextField(
+                                controller: newAdminPasswordController,
+                                decoration: const InputDecoration(
+                                  labelText: 'New Admin password',
+                                ),
+                                obscureText: true,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton(
+                              onPressed: () {
+                                final p = newAdminPasswordController.text;
+                                if (p.isEmpty) {
+                                  if (!mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Password cannot be empty'),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                _setAdminPassword(p);
+                                newAdminPasswordController.clear();
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Admin password updated'),
+                                  ),
+                                );
+                              },
+                              child: const Text('Set admin password'),
                             ),
                             const SizedBox(width: 8),
                             ElevatedButton(
@@ -1047,11 +1283,13 @@ class _HomePageState extends State<HomePage> {
                                   );
                                   return;
                                 }
+                                final messenger = ScaffoldMessenger.of(context);
                                 final url = await fetchUrlFromRegistry(
                                   syncId ?? '',
                                 );
                                 if (url == null) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text(
                                         'No registry entry found for current Sync ID',
@@ -1059,7 +1297,8 @@ class _HomePageState extends State<HomePage> {
                                     ),
                                   );
                                 } else {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     SnackBar(content: Text('Found URL: $url')),
                                   );
                                 }
