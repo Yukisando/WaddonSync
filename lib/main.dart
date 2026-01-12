@@ -256,15 +256,12 @@ class _HomePageState extends State<HomePage> {
   }) async {
     setState(() => isWorking = true);
     final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
-    final outPath = p.join(
-      Directory.systemTemp.path,
-      'waddonsync_backup_$timestamp.zip',
-    );
+    final outFile = await _getLocalFile('waddonsync_backup_$timestamp.zip');
 
     final archive = Archive();
 
-    void addFileAt(String storePath, File file) {
-      final bytes = file.readAsBytesSync();
+    Future<void> addFileAt(String storePath, File file) async {
+      final bytes = await file.readAsBytes();
       archive.addFile(ArchiveFile(storePath, bytes.length, bytes));
     }
 
@@ -272,7 +269,10 @@ class _HomePageState extends State<HomePage> {
     if (wtfDirObj.existsSync()) {
       // SavedVariables files: include all files under any SavedVariables folder
       if (includeSavedVars) {
-        for (final entity in wtfDirObj.listSync(recursive: true)) {
+        await for (final entity in wtfDirObj.list(
+          recursive: true,
+          followLinks: false,
+        )) {
           if (entity is File) {
             final rel = p.relative(entity.path, from: wtfDir);
             final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
@@ -281,7 +281,7 @@ class _HomePageState extends State<HomePage> {
                 'WTF',
                 p.relative(entity.path, from: wtfDir),
               );
-              addFileAt(store, entity);
+              await addFileAt(store, entity);
             }
             // include bindings files if selected
             if (includeBindings) {
@@ -292,7 +292,7 @@ class _HomePageState extends State<HomePage> {
                   'WTF',
                   p.relative(entity.path, from: wtfDir),
                 );
-                addFileAt(store, entity);
+                await addFileAt(store, entity);
               }
             }
           }
@@ -301,13 +301,17 @@ class _HomePageState extends State<HomePage> {
 
       if (includeConfig) {
         final cfg = File(p.join(wtfDir, 'Config.wtf'));
-        if (cfg.existsSync()) addFileAt(p.join('WTF', 'Config.wtf'), cfg);
+        if (await cfg.exists())
+          await addFileAt(p.join('WTF', 'Config.wtf'), cfg);
       }
     }
 
     final interfaceDirObj = Directory(interfaceDir);
     if (includeInterface && interfaceDirObj.existsSync()) {
-      for (final entity in interfaceDirObj.listSync(recursive: true)) {
+      await for (final entity in interfaceDirObj.list(
+        recursive: true,
+        followLinks: false,
+      )) {
         if (entity is File) {
           final rel = p.relative(entity.path, from: interfaceDir);
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
@@ -318,15 +322,14 @@ class _HomePageState extends State<HomePage> {
             'Interface',
             p.relative(entity.path, from: interfaceDir),
           );
-          addFileAt(store, entity);
+          await addFileAt(store, entity);
         }
       }
     }
 
     final zipEncoder = ZipEncoder();
     final zipData = zipEncoder.encode(archive)!;
-    final outFile = File(outPath);
-    outFile.writeAsBytesSync(zipData, flush: true);
+    await outFile.writeAsBytes(zipData, flush: true);
 
     setState(() {
       lastZipPath = outFile.path;
@@ -339,29 +342,12 @@ class _HomePageState extends State<HomePage> {
   Future<void> handleCreateZip() async {
     if (wtfPath == null || interfacePath == null) return;
     try {
-      await createZip(
-        wtfDir: wtfPath!,
-        interfaceDir: interfacePath!,
-        includeSavedVars: includeSavedVars,
-        includeConfig: includeConfig,
-        includeBindings: includeBindings,
-        includeInterface: includeInterface,
-        excludeCaches: excludeCaches,
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Zipping...'),
+          duration: Duration(seconds: 30),
+        ),
       );
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Backup created: $lastZipPath')));
-    } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  Future<void> handleUploadAndRegister() async {
-    if (wtfPath == null || interfacePath == null) return;
-    try {
       final zip = await createZip(
         wtfDir: wtfPath!,
         interfaceDir: interfacePath!,
@@ -372,11 +358,52 @@ class _HomePageState extends State<HomePage> {
         excludeCaches: excludeCaches,
       );
       if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Backup created: ${zip.path}')));
+    } catch (e) {
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error while zipping: $e')));
+    }
+  }
+
+  Future<void> handleUploadAndRegister() async {
+    if (wtfPath == null || interfacePath == null) return;
+    try {
+      // make the user aware we are zipping first
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Uploading to transfer.sh...')),
+        const SnackBar(
+          content: Text('Zipping...'),
+          duration: Duration(seconds: 30),
+        ),
       );
+      final zip = await createZip(
+        wtfDir: wtfPath!,
+        interfaceDir: interfacePath!,
+        includeSavedVars: includeSavedVars,
+        includeConfig: includeConfig,
+        includeBindings: includeBindings,
+        includeInterface: includeInterface,
+        excludeCaches: excludeCaches,
+      );
+      if (!mounted) return;
+
+      // start uploading
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Uploading to transfer.sh...'),
+          duration: Duration(seconds: 60),
+        ),
+      );
+      setState(() => isWorking = true);
       final url = await uploadToTransferSh(zip);
+      setState(() => isWorking = false);
       if (url == null) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('Upload failed.')));
@@ -391,8 +418,48 @@ class _HomePageState extends State<HomePage> {
       final msg = did
           ? 'Upload succeeded and registry updated. URL copied to clipboard.'
           : 'Upload succeeded. URL copied to clipboard.';
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
+      // show dialog with link and copy/open actions
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Upload complete'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [const Text('Link:'), SelectableText(url!)],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: url));
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Copy'),
+            ),
+            TextButton(
+              onPressed: () async {
+                await Process.run('rundll32', [
+                  'url.dll,FileProtocolHandler',
+                  url!,
+                ]);
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Open'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
     } catch (e) {
+      setState(() => isWorking = false);
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -433,173 +500,184 @@ class _HomePageState extends State<HomePage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-            const Text(
-              'Select source folders (Windows)',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(child: Text(wtfPath ?? 'WTF folder not selected')),
-                const SizedBox(width: 12),
-                ElevatedButton(
-                  onPressed: pickWtfFolder,
-                  child: const Text('Select WTF'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(interfacePath ?? 'Interface folder not selected'),
-                ),
-                const SizedBox(width: 12),
-                ElevatedButton(
-                  onPressed: pickInterfaceFolder,
-                  child: const Text('Select Interface'),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 20),
-
-            const Text(
-              'Backup options',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            CheckboxListTile(
-              title: const Text('SavedVariables (recommended)'),
-              value: includeSavedVars,
-              onChanged: (v) => setState(() => includeSavedVars = v ?? true),
-            ),
-            CheckboxListTile(
-              title: const Text('Config.wtf (engine settings)'),
-              value: includeConfig,
-              onChanged: (v) => setState(() => includeConfig = v ?? false),
-            ),
-            CheckboxListTile(
-              title: const Text('Keybindings (bindings-cache.wtf)'),
-              value: includeBindings,
-              onChanged: (v) => setState(() => includeBindings = v ?? false),
-            ),
-            CheckboxListTile(
-              title: const Text('Interface (addons) — optional'),
-              value: includeInterface,
-              onChanged: (v) => setState(() => includeInterface = v ?? false),
-            ),
-            CheckboxListTile(
-              title: const Text('Exclude Cache/WDB folders'),
-              value: excludeCaches,
-              onChanged: (v) => setState(() => excludeCaches = v ?? true),
-            ),
-
-            Row(
-              children: [
-                ElevatedButton(
-                  onPressed:
-                      (wtfPath != null && interfacePath != null && !isWorking)
-                      ? handleCreateZip
-                      : null,
-                  child: isWorking
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Create ZIP'),
-                ),
-                const SizedBox(width: 12),
-                ElevatedButton(
-                  onPressed:
-                      (wtfPath != null && interfacePath != null && !isWorking)
-                      ? handleUploadAndRegister
-                      : null,
-                  child: const Text('Save & Upload'),
-                ),
-                const SizedBox(width: 12),
-                ElevatedButton(
-                  onPressed: (lastZipPath != null)
-                      ? () async {
-                          // reveal in explorer
-                          final file = File(lastZipPath!);
-                          if (file.existsSync()) {
-                            await Process.run('explorer', [
-                              p.normalize(file.parent.path),
-                            ]);
-                          }
-                        }
-                      : null,
-                  child: const Text('Show folder'),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 16),
-            const Text(
-              'Sync ID',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: Text(syncId ?? 'Generating...')),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: () async {
-                    if (syncId == null) return;
-                    await Clipboard.setData(ClipboardData(text: syncId!));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Sync ID copied to clipboard'),
-                      ),
-                    );
-                  },
-                  child: const Text('Copy'),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: () async {
-                    final newId = _generateSyncId(16);
-                    await _saveSyncId(newId);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('New Sync ID generated')),
-                    );
-                  },
-                  child: const Text('Regenerate'),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-            const Text(
-              'Sync by ID',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: syncIdController,
-                    decoration: const InputDecoration(
-                      hintText: 'Enter Sync ID',
+              const Text(
+                'Select source folders (Windows)',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(child: Text(wtfPath ?? 'WTF folder not selected')),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    onPressed: pickWtfFolder,
+                    child: const Text('Select WTF'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      interfacePath ?? 'Interface folder not selected',
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: () => handleSyncById(syncIdController.text.trim()),
-                  child: const Text('Download'),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    onPressed: pickInterfaceFolder,
+                    child: const Text('Select Interface'),
+                  ),
+                ],
+              ),
 
-            const SizedBox(height: 12),
-            const Text(
-              'Using transfer.sh for uploads and a public GitHub gist as a small registry. To enable auto-update of the registry, set a GITHUB_TOKEN environment variable and configure the GIST_ID constant.',
-            ),
-          ],
+              const SizedBox(height: 20),
+
+              const Text(
+                'Backup options',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              CheckboxListTile(
+                title: const Text('SavedVariables (recommended)'),
+                value: includeSavedVars,
+                onChanged: (v) => setState(() => includeSavedVars = v ?? true),
+              ),
+              CheckboxListTile(
+                title: const Text('Config.wtf (engine settings)'),
+                value: includeConfig,
+                onChanged: (v) => setState(() => includeConfig = v ?? false),
+              ),
+              CheckboxListTile(
+                title: const Text('Keybindings (bindings-cache.wtf)'),
+                value: includeBindings,
+                onChanged: (v) => setState(() => includeBindings = v ?? false),
+              ),
+              CheckboxListTile(
+                title: const Text('Interface (addons) — optional'),
+                value: includeInterface,
+                onChanged: (v) => setState(() => includeInterface = v ?? false),
+              ),
+              CheckboxListTile(
+                title: const Text('Exclude Cache/WDB folders'),
+                value: excludeCaches,
+                onChanged: (v) => setState(() => excludeCaches = v ?? true),
+              ),
+
+              Row(
+                children: [
+                  ElevatedButton(
+                    onPressed:
+                        (wtfPath != null && interfacePath != null && !isWorking)
+                        ? handleCreateZip
+                        : null,
+                    child: isWorking
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Create ZIP'),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    onPressed:
+                        (wtfPath != null && interfacePath != null && !isWorking)
+                        ? handleUploadAndRegister
+                        : null,
+                    child: isWorking
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Save & Upload'),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    onPressed: (lastZipPath != null)
+                        ? () async {
+                            // reveal and select the file in explorer
+                            final file = File(lastZipPath!);
+                            if (file.existsSync()) {
+                              await Process.run('explorer', [
+                                '/select,',
+                                p.normalize(file.path),
+                              ]);
+                            }
+                          }
+                        : null,
+                    child: const Text('Show folder'),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 16),
+              const Text(
+                'Sync ID',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(child: Text(syncId ?? 'Generating...')),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () async {
+                      if (syncId == null) return;
+                      await Clipboard.setData(ClipboardData(text: syncId!));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Sync ID copied to clipboard'),
+                        ),
+                      );
+                    },
+                    child: const Text('Copy'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () async {
+                      final newId = _generateSyncId(16);
+                      await _saveSyncId(newId);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('New Sync ID generated')),
+                      );
+                    },
+                    child: const Text('Regenerate'),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+              const Text(
+                'Sync by ID',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: syncIdController,
+                      decoration: const InputDecoration(
+                        hintText: 'Enter Sync ID',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () =>
+                        handleSyncById(syncIdController.text.trim()),
+                    child: const Text('Download'),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+              const Text(
+                'Using transfer.sh for uploads and a public GitHub gist as a small registry. To enable auto-update of the registry, set a GITHUB_TOKEN environment variable and configure the GIST_ID constant.',
+              ),
+            ],
+          ),
         ),
       ),
     );
