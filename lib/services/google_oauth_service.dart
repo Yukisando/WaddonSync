@@ -102,7 +102,7 @@ class GoogleOAuthService {
       final accessToken = data['access_token'] as String;
       final expiresIn = data['expires_in'] as int;
       final tokenType = data['token_type'] as String;
-      final expiry = DateTime.now().add(Duration(seconds: expiresIn));
+      final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
 
       // Refresh token is usually not returned, so reuse the old one
       final refreshToken =
@@ -268,7 +268,7 @@ class GoogleOAuthService {
         );
       }
 
-      final expiry = DateTime.now().add(Duration(seconds: expiresIn));
+      final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
 
       return AccessCredentials(
         AccessToken(tokenType, accessToken, expiry),
