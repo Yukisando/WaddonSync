@@ -14,6 +14,7 @@ import 'package:flutter/services.dart';
 import 'services/google_drive_service.dart';
 import 'services/compression_service.dart';
 
+
 // Performs the heavy file collection and compression in a separate isolate.
 // Arguments (Map): wtfDir, interfaceDir, includeSavedVars, includeConfig,
 // includeBindings, includeInterface, excludeCaches
@@ -177,7 +178,19 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
 }
 
 void main() {
-  runApp(const MyApp());
+  // Capture Flutter framework errors and run the app in a guarded zone.
+  FlutterError.onError = (FlutterErrorDetails details) {
+    // Send framework errors to the console in Release as well.
+    FlutterError.presentError(details);
+  };
+
+  runZonedGuarded(() {
+    runApp(const MyApp());
+  }, (error, stack) {
+    // Print errors to console for diagnostics (visible if a console is attached).
+    print('Unhandled Zone error: $error');
+    print(stack);
+  });
 }
 
 class MyApp extends StatelessWidget {
@@ -247,6 +260,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    // Normal initialization sequence: load settings, detect installation, and migrate temp zips.
     _loadSettings();
     _attemptAutoDetect();
     _migrateOldTempZips();
@@ -271,6 +285,10 @@ class _HomePageState extends State<HomePage> {
 
     // Initialize Google Drive service
     _driveService = GoogleDriveService(_appendLog);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Post-frame callback for any startup UI work.
+    });
   }
 
   @override
@@ -355,7 +373,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadSettings() async {
-    try {
+      try {
       final f = await _getLocalFile('settings.json');
       if (!await f.exists()) return;
       final s = await f.readAsString();
