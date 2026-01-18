@@ -150,11 +150,7 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
-  // Show the window normally and update it
-  bool result = ShowWindow(window_handle_, SW_SHOWNORMAL);
-  UpdateWindow(window_handle_);
-  SetForegroundWindow(window_handle_);
-  return result;
+  return ShowWindow(window_handle_, SW_SHOWNORMAL);
 }
 
 // static
@@ -249,6 +245,13 @@ void Win32Window::SetChildContent(HWND content) {
 
   MoveWindow(content, frame.left, frame.top, frame.right - frame.left,
              frame.bottom - frame.top, true);
+
+  // Ensure the child content window is shown and force a redraw.
+  if (child_content_ != nullptr) {
+    ShowWindow(child_content_, SW_SHOWNORMAL);
+    RedrawWindow(child_content_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
+    UpdateWindow(child_content_);
+  }
 
   SetFocus(child_content_);
 }
