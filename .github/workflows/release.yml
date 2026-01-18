@@ -1,0 +1,107 @@
+name: Windows Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          
+      - name: Get project version
+        id: version
+        shell: pwsh
+        run: |
+          $content = Get-Content pubspec.yaml -Raw
+          if ($content -match 'version:\s+(\S+)') {
+            $version = $matches[1]
+            echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+            echo "Version: $version"
+          } else {
+            echo "VERSION=1.0.0" >> $env:GITHUB_OUTPUT
+          }
+          
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+        
+      - name: Install dependencies
+        run: flutter pub get
+        
+      - name: Build Windows executable
+        run: flutter build windows --release
+        
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $releaseName = "WaddonSync-Windows-$version"
+          
+          # Create a clean directory for the release
+          New-Item -ItemType Directory -Force -Path release
+          
+          # Copy the built application
+          Copy-Item -Path "build\windows\x64\runner\Release\*" -Destination "release\" -Recurse
+          
+          # Create a zip file
+          Compress-Archive -Path "release\*" -DestinationPath "$releaseName.zip"
+          
+          echo "RELEASE_NAME=$releaseName" >> $env:GITHUB_OUTPUT
+        id: archive
+        
+      - name: Generate release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $notes = @"
+          ## WaddonSync Windows Release
+          
+          **Version:** ${{ steps.version.outputs.VERSION }}
+          **Build Date:** $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+          
+          ### Installation
+          1. Download the zip file below
+          2. Extract the contents to a folder of your choice
+          3. Run ``waddonsync.exe``
+          
+          ### Features
+          - Backup and sync World of Warcraft addons and settings
+          - Google Drive integration for cloud backups
+          - Dark mode support with theme toggle
+          - Compress and apply backups with ease
+          
+          ### Requirements
+          - Windows 10 or later
+          
+          ---
+          *Automated build from commit ${{ github.sha }}*
+          "@
+          
+          # Save to file for the release
+          $notes | Out-File -FilePath release_notes.md -Encoding utf8
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}-build.${{ github.run_number }}
+          name: WaddonSync v${{ steps.version.outputs.VERSION }} (Build ${{ github.run_number }})
+          body_path: release_notes.md
+          files: |
+            ${{ steps.archive.outputs.RELEASE_NAME }}.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
