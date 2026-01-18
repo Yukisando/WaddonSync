@@ -1384,126 +1384,296 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // Shows a dialog listing online backups (Google Drive). Latest is selected
-  // by default. Allows downloading/applying a selected backup and deleting
-  // individual online backups via the bin icon.
-  Future<void> _showManageOnlineBackups() async {
+  // Shows a dialog listing both local and online backups (Google Drive).
+  // Latest is selected by default. Allows downloading/applying a selected
+  // backup and deleting individual backups via the bin icon.
+  Future<void> _showManageBackups() async {
     final messenger = ScaffoldMessenger.of(context);
 
+    // Show loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Loading backups...'),
+          ],
+        ),
+      ),
+    );
+
+    // Gather local backups
+    var localBackups = <Map<String, dynamic>>[];
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final folder = Directory(
+        p.join(appDir.parent.path, 'com.waddonsync', 'WaddonSync'),
+      );
+      if (await folder.exists()) {
+        final files = folder.listSync().whereType<File>().where((f) {
+          final ext = p.extension(f.path).toLowerCase();
+          return ext == '.zip' || ext == '.7z';
+        }).toList();
+        files.sort(
+          (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+        );
+        for (final f in files) {
+          localBackups.add({
+            'type': 'local',
+            'path': f.path,
+            'name': p.basename(f.path),
+            'size': f.lengthSync(),
+            'modified': f.statSync().modified.toIso8601String(),
+          });
+        }
+      }
+    } catch (e) {
+      await _appendLog('Failed to list local backups: $e');
+    }
+
+    // Gather online backups
+    var onlineBackups = <Map<String, dynamic>>[];
     _driveService ??= GoogleDriveService(_appendLog);
     final initialized = await _driveService!.initialize();
-    if (!initialized) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to initialize Google Drive')),
-      );
+    if (initialized) {
+      try {
+        onlineBackups = await _driveService!.listBackups();
+        for (final b in onlineBackups) {
+          b['type'] = 'online';
+        }
+      } catch (e) {
+        await _appendLog('Failed to list online backups: $e');
+      }
+    }
+
+    // Close loading dialog
+    if (!mounted) return;
+    Navigator.of(context).pop();
+
+    // Combined list
+    final allBackups = [...localBackups, ...onlineBackups];
+
+    if (allBackups.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('No backups found')));
       return;
     }
 
-    var backups = await _driveService!.listBackups();
-
-    if (backups.isEmpty) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('No online backups found')),
-      );
-      return;
+    String? selectedId;
+    if (allBackups.isNotEmpty) {
+      final first = allBackups.first;
+      selectedId = first['type'] == 'local'
+          ? 'local:${first['path']}'
+          : 'online:${first['fileId']}';
     }
-
-    String? selectedFileId = backups.first['fileId'] as String?;
 
     await showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx2, setState2) => AlertDialog(
-          title: const Text('Manage online backups'),
+          title: const Text('Manage Backups'),
           content: SizedBox(
             width: double.maxFinite,
-            height: MediaQuery.of(ctx2).size.height * 0.5,
+            height: MediaQuery.of(ctx2).size.height * 0.6,
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: ListView.separated(
-                    itemCount: backups.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1),
-                    itemBuilder: (ctx3, idx) {
-                      final b = backups[idx];
-                      final fid = b['fileId'] as String?;
-                      final name = b['name'] as String? ?? '';
-                      final created = b['createdTime'] as String? ?? '';
-                      final size = b['size']?.toString() ?? '';
+                // Local backups section
+                if (localBackups.isNotEmpty) ...[
+                  const Text(
+                    'Local Backups',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  ...localBackups.map((b) {
+                    final path = b['path'] as String;
+                    final name = b['name'] as String;
+                    final size = b['size'] as int;
+                    final modified = b['modified'] as String;
+                    final id = 'local:$path';
 
-                      return ListTile(
-                        leading: Radio<String>(
-                          value: fid ?? '',
-                          groupValue: selectedFileId ?? '',
-                          onChanged: (v) => setState2(() => selectedFileId = v),
-                        ),
-                        title: Text(name),
-                        subtitle: Text('$created • ${size} bytes'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete),
-                          tooltip: 'Delete backup',
-                          onPressed: fid == null
-                              ? null
-                              : () async {
-                                  final confirm = await showDialog<bool>(
-                                    context: ctx2,
-                                    builder: (c) => AlertDialog(
-                                      title: const Text('Delete backup?'),
-                                      content: Text(
-                                        'Delete "$name" from your Google Drive backups? This cannot be undone.',
+                    return ListTile(
+                      leading: Radio<String>(
+                        value: id,
+                        groupValue: selectedId ?? '',
+                        onChanged: (v) => setState2(() => selectedId = v),
+                      ),
+                      title: Text(name),
+                      subtitle: Text(
+                        '$modified • ${(size / (1024 * 1024)).toStringAsFixed(2)} MB',
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete),
+                        tooltip: 'Delete local backup',
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: ctx2,
+                            builder: (c) => AlertDialog(
+                              title: const Text('Delete backup?'),
+                              content: Text(
+                                'Delete "$name" from your local backups? This cannot be undone.',
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.of(c).pop(false),
+                                  child: const Text('Cancel'),
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.of(c).pop(true),
+                                  child: const Text('Delete'),
+                                ),
+                              ],
+                            ),
+                          );
+
+                          if (confirm != true) return;
+
+                          try {
+                            await File(path).delete();
+                            setState2(() => localBackups.remove(b));
+                            if (selectedId == id) {
+                              final remaining = [
+                                ...localBackups,
+                                ...onlineBackups,
+                              ];
+                              setState2(
+                                () => selectedId = remaining.isEmpty
+                                    ? null
+                                    : (remaining.first['type'] == 'local'
+                                          ? 'local:${remaining.first['path']}'
+                                          : 'online:${remaining.first['fileId']}'),
+                              );
+                            }
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Backup deleted')),
+                            );
+                          } catch (e) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to delete: $e')),
+                            );
+                          }
+                        },
+                      ),
+                    );
+                  }),
+                  const SizedBox(height: 16),
+                  const Divider(),
+                  const SizedBox(height: 8),
+                ],
+
+                // Online backups section
+                if (onlineBackups.isNotEmpty) ...[
+                  const Text(
+                    'Online Backups (Google Drive)',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: onlineBackups.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (ctx3, idx) {
+                        final b = onlineBackups[idx];
+                        final fid = b['fileId'] as String?;
+                        final name = b['name'] as String? ?? '';
+                        final created = b['createdTime'] as String? ?? '';
+                        final size = b['size']?.toString() ?? '';
+                        final id = 'online:$fid';
+
+                        return ListTile(
+                          leading: Radio<String>(
+                            value: id,
+                            groupValue: selectedId ?? '',
+                            onChanged: (v) => setState2(() => selectedId = v),
+                          ),
+                          title: Text(name),
+                          subtitle: Text('$created • $size bytes'),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete),
+                            tooltip: 'Delete online backup',
+                            onPressed: fid == null
+                                ? null
+                                : () async {
+                                    final confirm = await showDialog<bool>(
+                                      context: ctx2,
+                                      builder: (c) => AlertDialog(
+                                        title: const Text('Delete backup?'),
+                                        content: Text(
+                                          'Delete "$name" from your Google Drive backups? This cannot be undone.',
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.of(c).pop(false),
+                                            child: const Text('Cancel'),
+                                          ),
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.of(c).pop(true),
+                                            child: const Text('Delete'),
+                                          ),
+                                        ],
                                       ),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.of(c).pop(false),
-                                          child: const Text('Cancel'),
-                                        ),
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.of(c).pop(true),
-                                          child: const Text('Delete'),
-                                        ),
-                                      ],
-                                    ),
-                                  );
+                                    );
 
-                                  if (confirm != true) return;
+                                    if (confirm != true) return;
 
-                                  final ok = await _driveService!.deleteBackup(
-                                    fid,
-                                  );
-                                  if (ok) {
-                                    setState2(() => backups.removeAt(idx));
-                                    if (selectedFileId == fid) {
+                                    final ok = await _driveService!
+                                        .deleteBackup(fid);
+                                    if (ok) {
                                       setState2(
-                                        () =>
-                                            selectedFileId = backups.isNotEmpty
-                                            ? backups.first['fileId'] as String?
-                                            : null,
+                                        () => onlineBackups.removeAt(idx),
+                                      );
+                                      if (selectedId == id) {
+                                        final remaining = [
+                                          ...localBackups,
+                                          ...onlineBackups,
+                                        ];
+                                        setState2(
+                                          () => selectedId = remaining.isEmpty
+                                              ? null
+                                              : (remaining.first['type'] ==
+                                                        'local'
+                                                    ? 'local:${remaining.first['path']}'
+                                                    : 'online:${remaining.first['fileId']}'),
+                                        );
+                                      }
+                                      if (!mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Backup deleted'),
+                                        ),
+                                      );
+                                    } else {
+                                      if (!mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Failed to delete backup',
+                                          ),
+                                        ),
                                       );
                                     }
-                                    if (!mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Backup deleted'),
-                                      ),
-                                    );
-                                  } else {
-                                    if (!mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                          'Failed to delete backup',
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                },
-                        ),
-                      );
-                    },
+                                  },
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                ),
+                ] else if (localBackups.isEmpty) ...[
+                  const Expanded(
+                    child: Center(child: Text('No online backups found')),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1513,79 +1683,200 @@ class _HomePageState extends State<HomePage> {
               child: const Text('Close'),
             ),
             TextButton(
-              onPressed: selectedFileId == null
+              onPressed: selectedId == null
                   ? null
                   : () async {
-                      final bIndex = backups.indexWhere(
-                        (e) => e['fileId'] == selectedFileId,
-                      );
-                      if (bIndex < 0) return;
-                      final b = backups[bIndex];
-                      final name = b['name'] as String? ?? 'backup.zip';
-                      final outFile = await _getLocalFile(name);
-                      final file = await downloadFromDrive(
-                        selectedFileId!,
-                        outFile.path,
-                      );
-                      if (file == null) {
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Failed to download selected backup'),
-                          ),
-                        );
-                        return;
-                      }
-
-                      setState(() => lastZipPath = file.path);
-
-                      // Ask to apply like existing flow
-                      if (!mounted) return;
-                      final apply = await showDialog<bool>(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          title: const Text('Backup downloaded'),
-                          content: SelectableText(
-                            'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.of(ctx).pop(false),
-                              child: const Text('Cancel'),
-                            ),
-                            TextButton(
-                              onPressed: () => Navigator.of(ctx).pop(true),
-                              child: const Text('Apply'),
-                            ),
-                          ],
-                        ),
-                      );
-
-                      Navigator.of(ctx2).pop();
-
-                      if (apply == true) {
-                        final err = await _applyBackupFile(file);
-                        if (err == null) {
+                      // Determine if selected is local or online
+                      if (selectedId!.startsWith('local:')) {
+                        final path = selectedId!.substring('local:'.length);
+                        final file = File(path);
+                        if (!await file.exists()) {
                           if (!mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Apply completed')),
+                            const SnackBar(
+                              content: Text('Selected backup no longer exists'),
+                            ),
                           );
+                          return;
+                        }
+
+                        setState(() => lastZipPath = file.path);
+
+                        // Ask to apply
+                        if (!mounted) return;
+                        final apply = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: const Text('Apply local backup'),
+                            content: SelectableText(
+                              'Apply "${p.basename(path)}" to your World of Warcraft folders?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(ctx).pop(false),
+                                child: const Text('Cancel'),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.of(ctx).pop(true),
+                                child: const Text('Apply'),
+                              ),
+                            ],
+                          ),
+                        );
+
+                        Navigator.of(ctx2).pop();
+
+                        if (apply == true) {
+                          // Show applying progress
+                          showDialog(
+                            context: context,
+                            barrierDismissible: false,
+                            builder: (ctx) => const AlertDialog(
+                              content: Row(
+                                children: [
+                                  CircularProgressIndicator(),
+                                  SizedBox(width: 20),
+                                  Text('Applying backup...'),
+                                ],
+                              ),
+                            ),
+                          );
+
+                          final err = await _applyBackupFile(file);
+
+                          // Close loading
+                          if (!mounted) return;
+                          Navigator.of(context).pop();
+
+                          if (err == null) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Apply completed')),
+                            );
+                          } else {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Apply failed: $err')),
+                            );
+                          }
+                        }
+                      } else if (selectedId!.startsWith('online:')) {
+                        // Show loading
+                        showDialog(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (ctx) => const AlertDialog(
+                            content: Row(
+                              children: [
+                                CircularProgressIndicator(),
+                                SizedBox(width: 20),
+                                Text('Downloading backup...'),
+                              ],
+                            ),
+                          ),
+                        );
+
+                        final fileId = selectedId!.substring('online:'.length);
+                        final bIndex = onlineBackups.indexWhere(
+                          (e) => e['fileId'] == fileId,
+                        );
+                        if (bIndex < 0) {
+                          Navigator.of(context).pop(); // Close loading
+                          return;
+                        }
+                        final b = onlineBackups[bIndex];
+                        final name = b['name'] as String? ?? 'backup.zip';
+                        final outFile = await _getLocalFile(name);
+                        final file = await downloadFromDrive(
+                          fileId,
+                          outFile.path,
+                        );
+
+                        // Close loading dialog
+                        if (!mounted) return;
+                        Navigator.of(context).pop();
+                        if (file == null) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Failed to download selected backup',
+                              ),
+                            ),
+                          );
+                          return;
+                        }
+
+                        setState(() => lastZipPath = file.path);
+
+                        // Ask to apply like existing flow
+                        if (!mounted) return;
+                        final apply = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: const Text('Backup downloaded'),
+                            content: SelectableText(
+                              'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(ctx).pop(false),
+                                child: const Text('Cancel'),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.of(ctx).pop(true),
+                                child: const Text('Apply'),
+                              ),
+                            ],
+                          ),
+                        );
+
+                        Navigator.of(ctx2).pop();
+
+                        if (apply == true) {
+                          // Show applying progress
+                          showDialog(
+                            context: context,
+                            barrierDismissible: false,
+                            builder: (ctx) => const AlertDialog(
+                              content: Row(
+                                children: [
+                                  CircularProgressIndicator(),
+                                  SizedBox(width: 20),
+                                  Text('Applying backup...'),
+                                ],
+                              ),
+                            ),
+                          );
+
+                          final err = await _applyBackupFile(file);
+
+                          // Close loading
+                          if (!mounted) return;
+                          Navigator.of(context).pop();
+
+                          if (err == null) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Apply completed')),
+                            );
+                          } else {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Apply failed: $err')),
+                            );
+                          }
                         } else {
                           if (!mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Apply failed: $err')),
+                            SnackBar(
+                              content: Text('Downloaded to: ${file.path}'),
+                            ),
                           );
                         }
-                      } else {
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Downloaded to: ${file.path}'),
-                          ),
-                        );
                       }
                     },
-              child: const Text('Download & Apply'),
+              child: const Text('Apply Selected'),
             ),
           ],
         ),
@@ -1947,7 +2238,7 @@ class _HomePageState extends State<HomePage> {
 
                   Row(
                     children: [
-                      // Primary actions
+                      // Local backup actions
                       ElevatedButton(
                         onPressed: (wowRootPath != null && !isWorking)
                             ? handleCreateZip
@@ -1960,46 +2251,71 @@ class _HomePageState extends State<HomePage> {
                                   strokeWidth: 2,
                                 ),
                               )
-                            : const Text('Create ZIP'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: (lastZipPath != null && !isWorking)
-                            ? uploadLatestAndRegister
-                            : null,
-                        child: const Text('Upload latest'),
+                            : const Text('Create New Backup'),
                       ),
                       const SizedBox(width: 8),
                       ElevatedButton(
                         onPressed: (lastZipPath != null && !isWorking)
                             ? _applyLatestLocal
                             : null,
-                        child: const Text('Apply latest'),
+                        child: const Text('Apply Latest Backup'),
                       ),
 
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 20),
+                      const SizedBox(
+                        height: 40,
+                        child: VerticalDivider(thickness: 2),
+                      ),
+                      const SizedBox(width: 12),
 
-                      // Secondary actions
-                      OutlinedButton(
-                        onPressed: (!isWorking) ? _loadLatestAndApply : null,
-                        child: const Text('Load latest'),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(
-                        onPressed: (!isWorking) ? _openLocalBackupFolder : null,
-                        child: const Text('Show folder'),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(
-                        onPressed: _refreshLocalBackups,
-                        child: const Text('Refresh'),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(
-                        onPressed: (!isWorking)
-                            ? _showManageOnlineBackups
+                      // Upload actions (green)
+                      ElevatedButton(
+                        onPressed: (lastZipPath != null && !isWorking)
+                            ? uploadLatestAndRegister
                             : null,
-                        child: const Text('Manage online backups'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green[700],
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text('Upload Latest Backup'),
+                      ),
+
+                      const SizedBox(width: 12),
+                      const SizedBox(
+                        height: 40,
+                        child: VerticalDivider(thickness: 2),
+                      ),
+                      const SizedBox(width: 12),
+
+                      // Download actions (blue)
+                      ElevatedButton(
+                        onPressed: (!isWorking) ? _loadLatestAndApply : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue[700],
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text('Load Latest Backup'),
+                      ),
+
+                      const Spacer(),
+
+                      // Utility actions with icons
+                      IconButton(
+                        icon: const Icon(Icons.folder_open),
+                        tooltip: 'Show Folder',
+                        onPressed: (!isWorking) ? _openLocalBackupFolder : null,
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.refresh),
+                        tooltip: 'Refresh',
+                        onPressed: _refreshLocalBackups,
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.storage),
+                        tooltip: 'Manage Backups',
+                        onPressed: (!isWorking) ? _showManageBackups : null,
                       ),
                     ],
                   ),
