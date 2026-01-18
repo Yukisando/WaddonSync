@@ -14,7 +14,6 @@ import 'package:flutter/services.dart';
 import 'services/google_drive_service.dart';
 import 'services/compression_service.dart';
 
-
 // Performs the heavy file collection and compression in a separate isolate.
 // Arguments (Map): wtfDir, interfaceDir, includeSavedVars, includeConfig,
 // includeBindings, includeInterface, excludeCaches
@@ -184,13 +183,16 @@ void main() {
     FlutterError.presentError(details);
   };
 
-  runZonedGuarded(() {
-    runApp(const MyApp());
-  }, (error, stack) {
-    // Print errors to console for diagnostics (visible if a console is attached).
-    print('Unhandled Zone error: $error');
-    print(stack);
-  });
+  runZonedGuarded(
+    () {
+      runApp(const MyApp());
+    },
+    (error, stack) {
+      // Print errors to console for diagnostics (visible if a console is attached).
+      print('Unhandled Zone error: $error');
+      print(stack);
+    },
+  );
 }
 
 class MyApp extends StatelessWidget {
@@ -373,7 +375,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadSettings() async {
-      try {
+    try {
       final f = await _getLocalFile('settings.json');
       if (!await f.exists()) return;
       final s = await f.readAsString();
