@@ -195,8 +195,24 @@ void main() {
   );
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  // Start with dark mode as default
+  ThemeMode _themeMode = ThemeMode.dark;
+
+  void _toggleTheme() {
+    setState(() {
+      _themeMode = _themeMode == ThemeMode.light
+          ? ThemeMode.dark
+          : ThemeMode.light;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -204,16 +220,34 @@ class MyApp extends StatelessWidget {
       title: 'WaddonSync',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blueGrey,
+          brightness: Brightness.light,
+        ),
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.blueGrey,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: _themeMode,
+      home: HomePage(onToggleTheme: _toggleTheme, themeMode: _themeMode),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  final VoidCallback onToggleTheme;
+  final ThemeMode themeMode;
+
+  const HomePage({
+    super.key,
+    required this.onToggleTheme,
+    required this.themeMode,
+  });
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -2051,6 +2085,17 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: widget.themeMode == ThemeMode.dark
+                ? 'Switch to light mode'
+                : 'Switch to dark mode',
+            icon: Icon(
+              widget.themeMode == ThemeMode.dark
+                  ? Icons.light_mode
+                  : Icons.dark_mode,
+            ),
+            onPressed: widget.onToggleTheme,
+          ),
           IconButton(
             tooltip: 'Google Drive Settings',
             icon: const Icon(Icons.cloud),
