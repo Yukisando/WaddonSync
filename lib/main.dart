@@ -285,7 +285,11 @@ class _HomePageState extends State<HomePage> {
   bool excludeCaches = true;
 
   // Apply options (for restoring backups)
+  bool applySavedVars = true;
   bool applyConfig = false; // default off when applying
+  bool applyBindings = true;
+  bool applyInterface = true;
+  bool cleanApply = true; // Clean mode: delete before applying
 
   // Google Drive service
   GoogleDriveService? _driveService;
@@ -1278,28 +1282,69 @@ class _HomePageState extends State<HomePage> {
 
       // Ask user if they want to apply the downloaded backup now
       if (!mounted) return;
+      bool tempApplySavedVars = applySavedVars;
       bool tempApplyConfig = applyConfig;
+      bool tempApplyBindings = applyBindings;
+      bool tempApplyInterface = applyInterface;
+      bool tempCleanApply = cleanApply;
       final apply = await showDialog<bool>(
         context: context,
         builder: (ctx) => StatefulBuilder(
           builder: (ctx2, setState2) => AlertDialog(
             title: const Text('Backup downloaded'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SelectableText(
-                  'Downloaded "$fileName" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
-                ),
-                const SizedBox(height: 16),
-                CheckboxListTile(
-                  title: const Text('Apply Config.wtf'),
-                  subtitle: const Text('Include game settings from backup'),
-                  value: tempApplyConfig,
-                  onChanged: (v) =>
-                      setState2(() => tempApplyConfig = v ?? false),
-                ),
-              ],
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SelectableText(
+                    'Downloaded "$fileName" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Select what to apply:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('SavedVariables'),
+                    subtitle: const Text('Addon settings and data'),
+                    value: tempApplySavedVars,
+                    onChanged: (v) =>
+                        setState2(() => tempApplySavedVars = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Config.wtf'),
+                    subtitle: const Text('Game settings'),
+                    value: tempApplyConfig,
+                    onChanged: (v) =>
+                        setState2(() => tempApplyConfig = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Keybindings'),
+                    subtitle: const Text('Key bindings'),
+                    value: tempApplyBindings,
+                    onChanged: (v) =>
+                        setState2(() => tempApplyBindings = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Interface'),
+                    subtitle: const Text('Addon files'),
+                    value: tempApplyInterface,
+                    onChanged: (v) =>
+                        setState2(() => tempApplyInterface = v ?? false),
+                  ),
+                  const Divider(),
+                  CheckboxListTile(
+                    title: const Text('Clean apply'),
+                    subtitle: const Text(
+                      'Delete existing files before applying',
+                    ),
+                    value: tempCleanApply,
+                    onChanged: (v) =>
+                        setState2(() => tempCleanApply = v ?? false),
+                  ),
+                ],
+              ),
             ),
             actions: [
               TextButton(
@@ -1308,7 +1353,13 @@ class _HomePageState extends State<HomePage> {
               ),
               TextButton(
                 onPressed: () {
-                  setState(() => applyConfig = tempApplyConfig);
+                  setState(() {
+                    applySavedVars = tempApplySavedVars;
+                    applyConfig = tempApplyConfig;
+                    applyBindings = tempApplyBindings;
+                    applyInterface = tempApplyInterface;
+                    cleanApply = tempCleanApply;
+                  });
                   Navigator.of(ctx).pop(true);
                 },
                 child: const Text('Apply'),
@@ -1329,7 +1380,14 @@ class _HomePageState extends State<HomePage> {
       }
 
       // User chose to apply: extract and copy using helper
-      final err = await _applyBackupFile(file, applyConfigWtf: applyConfig);
+      final err = await _applyBackupFile(
+        file,
+        applySavedVarsFilter: applySavedVars,
+        applyConfigFilter: applyConfig,
+        applyBindingsFilter: applyBindings,
+        applyInterfaceFilter: applyInterface,
+        cleanMode: cleanApply,
+      );
       if (err != null) {
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
@@ -1908,31 +1966,78 @@ class _HomePageState extends State<HomePage> {
 
                         // Ask to apply
                         if (!mounted) return;
+                        bool tempApplySavedVars = applySavedVars;
                         bool tempApplyConfig = applyConfig;
+                        bool tempApplyBindings = applyBindings;
+                        bool tempApplyInterface = applyInterface;
+                        bool tempCleanApply = cleanApply;
                         final apply = await showDialog<bool>(
                           context: context,
                           builder: (ctx) => StatefulBuilder(
                             builder: (ctx3, setState3) => AlertDialog(
                               title: const Text('Apply local backup'),
-                              content: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  SelectableText(
-                                    'Apply "${p.basename(path)}" to your World of Warcraft folders?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
-                                  ),
-                                  const SizedBox(height: 16),
-                                  CheckboxListTile(
-                                    title: const Text('Apply Config.wtf'),
-                                    subtitle: const Text(
-                                      'Include game settings from backup',
+                              content: SingleChildScrollView(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    SelectableText(
+                                      'Apply "${p.basename(path)}" to your World of Warcraft folders?',
                                     ),
-                                    value: tempApplyConfig,
-                                    onChanged: (v) => setState3(
-                                      () => tempApplyConfig = v ?? false,
+                                    const SizedBox(height: 16),
+                                    const Text(
+                                      'Select what to apply:',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    CheckboxListTile(
+                                      title: const Text('SavedVariables'),
+                                      subtitle: const Text(
+                                        'Addon settings and data',
+                                      ),
+                                      value: tempApplySavedVars,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplySavedVars = v ?? false,
+                                      ),
+                                    ),
+                                    CheckboxListTile(
+                                      title: const Text('Config.wtf'),
+                                      subtitle: const Text('Game settings'),
+                                      value: tempApplyConfig,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplyConfig = v ?? false,
+                                      ),
+                                    ),
+                                    CheckboxListTile(
+                                      title: const Text('Keybindings'),
+                                      subtitle: const Text('Key bindings'),
+                                      value: tempApplyBindings,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplyBindings = v ?? false,
+                                      ),
+                                    ),
+                                    CheckboxListTile(
+                                      title: const Text('Interface'),
+                                      subtitle: const Text('Addon files'),
+                                      value: tempApplyInterface,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplyInterface = v ?? false,
+                                      ),
+                                    ),
+                                    const Divider(),
+                                    CheckboxListTile(
+                                      title: const Text('Clean apply'),
+                                      subtitle: const Text(
+                                        'Delete existing files before applying',
+                                      ),
+                                      value: tempCleanApply,
+                                      onChanged: (v) => setState3(
+                                        () => tempCleanApply = v ?? false,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                               actions: [
                                 TextButton(
@@ -1941,9 +2046,13 @@ class _HomePageState extends State<HomePage> {
                                 ),
                                 TextButton(
                                   onPressed: () {
-                                    setState(
-                                      () => applyConfig = tempApplyConfig,
-                                    );
+                                    setState(() {
+                                      applySavedVars = tempApplySavedVars;
+                                      applyConfig = tempApplyConfig;
+                                      applyBindings = tempApplyBindings;
+                                      applyInterface = tempApplyInterface;
+                                      cleanApply = tempCleanApply;
+                                    });
                                     Navigator.of(ctx).pop(true);
                                   },
                                   child: const Text('Apply'),
@@ -1973,7 +2082,11 @@ class _HomePageState extends State<HomePage> {
 
                           final err = await _applyBackupFile(
                             file,
-                            applyConfigWtf: applyConfig,
+                            applySavedVarsFilter: applySavedVars,
+                            applyConfigFilter: applyConfig,
+                            applyBindingsFilter: applyBindings,
+                            applyInterfaceFilter: applyInterface,
+                            cleanMode: cleanApply,
                           );
 
                           // Close loading
@@ -2043,31 +2156,78 @@ class _HomePageState extends State<HomePage> {
 
                         // Ask to apply like existing flow
                         if (!mounted) return;
+                        bool tempApplySavedVars = applySavedVars;
                         bool tempApplyConfig = applyConfig;
+                        bool tempApplyBindings = applyBindings;
+                        bool tempApplyInterface = applyInterface;
+                        bool tempCleanApply = cleanApply;
                         final apply = await showDialog<bool>(
                           context: context,
                           builder: (ctx) => StatefulBuilder(
                             builder: (ctx3, setState3) => AlertDialog(
                               title: const Text('Backup downloaded'),
-                              content: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  SelectableText(
-                                    'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?\n\nThis will overwrite files in your World of Warcraft root folder (WTF and Interface). All files and folders that conflict will be overwritten by the backup contents.',
-                                  ),
-                                  const SizedBox(height: 16),
-                                  CheckboxListTile(
-                                    title: const Text('Apply Config.wtf'),
-                                    subtitle: const Text(
-                                      'Include game settings from backup',
+                              content: SingleChildScrollView(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    SelectableText(
+                                      'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
                                     ),
-                                    value: tempApplyConfig,
-                                    onChanged: (v) => setState3(
-                                      () => tempApplyConfig = v ?? false,
+                                    const SizedBox(height: 16),
+                                    const Text(
+                                      'Select what to apply:',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                    CheckboxListTile(
+                                      title: const Text('SavedVariables'),
+                                      subtitle: const Text(
+                                        'Addon settings and data',
+                                      ),
+                                      value: tempApplySavedVars,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplySavedVars = v ?? false,
+                                      ),
+                                    ),
+                                    CheckboxListTile(
+                                      title: const Text('Config.wtf'),
+                                      subtitle: const Text('Game settings'),
+                                      value: tempApplyConfig,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplyConfig = v ?? false,
+                                      ),
+                                    ),
+                                    CheckboxListTile(
+                                      title: const Text('Keybindings'),
+                                      subtitle: const Text('Key bindings'),
+                                      value: tempApplyBindings,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplyBindings = v ?? false,
+                                      ),
+                                    ),
+                                    CheckboxListTile(
+                                      title: const Text('Interface'),
+                                      subtitle: const Text('Addon files'),
+                                      value: tempApplyInterface,
+                                      onChanged: (v) => setState3(
+                                        () => tempApplyInterface = v ?? false,
+                                      ),
+                                    ),
+                                    const Divider(),
+                                    CheckboxListTile(
+                                      title: const Text('Clean apply'),
+                                      subtitle: const Text(
+                                        'Delete existing files before applying',
+                                      ),
+                                      value: tempCleanApply,
+                                      onChanged: (v) => setState3(
+                                        () => tempCleanApply = v ?? false,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                               actions: [
                                 TextButton(
@@ -2076,9 +2236,13 @@ class _HomePageState extends State<HomePage> {
                                 ),
                                 TextButton(
                                   onPressed: () {
-                                    setState(
-                                      () => applyConfig = tempApplyConfig,
-                                    );
+                                    setState(() {
+                                      applySavedVars = tempApplySavedVars;
+                                      applyConfig = tempApplyConfig;
+                                      applyBindings = tempApplyBindings;
+                                      applyInterface = tempApplyInterface;
+                                      cleanApply = tempCleanApply;
+                                    });
                                     Navigator.of(ctx).pop(true);
                                   },
                                   child: const Text('Apply'),
@@ -2108,7 +2272,11 @@ class _HomePageState extends State<HomePage> {
 
                           final err = await _applyBackupFile(
                             file,
-                            applyConfigWtf: applyConfig,
+                            applySavedVarsFilter: applySavedVars,
+                            applyConfigFilter: applyConfig,
+                            applyBindingsFilter: applyBindings,
+                            applyInterfaceFilter: applyInterface,
+                            cleanMode: cleanApply,
                           );
 
                           // Close loading
@@ -2242,28 +2410,69 @@ class _HomePageState extends State<HomePage> {
 
       // Ask user to confirm with config toggle
       if (!mounted) return;
+      bool tempApplySavedVars = applySavedVars;
       bool tempApplyConfig = applyConfig;
+      bool tempApplyBindings = applyBindings;
+      bool tempApplyInterface = applyInterface;
+      bool tempCleanApply = cleanApply;
       final result = await showDialog<bool>(
         context: context,
         builder: (ctx) => StatefulBuilder(
           builder: (ctx2, setState2) => AlertDialog(
             title: const Text('Apply latest backup'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Latest backup: $name\nSource: ${isLocal ? 'Local' : 'Google Drive'}\n\nThis will extract and overwrite your World of Warcraft folders (WTF and Interface). All conflicting files/folders will be overwritten. Proceed?',
-                ),
-                const SizedBox(height: 16),
-                CheckboxListTile(
-                  title: const Text('Apply Config.wtf'),
-                  subtitle: const Text('Include game settings from backup'),
-                  value: tempApplyConfig,
-                  onChanged: (v) =>
-                      setState2(() => tempApplyConfig = v ?? false),
-                ),
-              ],
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Latest backup: $name\nSource: ${isLocal ? 'Local' : 'Google Drive'}',
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Select what to apply:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('SavedVariables'),
+                    subtitle: const Text('Addon settings and data'),
+                    value: tempApplySavedVars,
+                    onChanged: (v) =>
+                        setState2(() => tempApplySavedVars = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Config.wtf'),
+                    subtitle: const Text('Game settings'),
+                    value: tempApplyConfig,
+                    onChanged: (v) =>
+                        setState2(() => tempApplyConfig = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Keybindings'),
+                    subtitle: const Text('Key bindings'),
+                    value: tempApplyBindings,
+                    onChanged: (v) =>
+                        setState2(() => tempApplyBindings = v ?? false),
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Interface'),
+                    subtitle: const Text('Addon files'),
+                    value: tempApplyInterface,
+                    onChanged: (v) =>
+                        setState2(() => tempApplyInterface = v ?? false),
+                  ),
+                  const Divider(),
+                  CheckboxListTile(
+                    title: const Text('Clean apply'),
+                    subtitle: const Text(
+                      'Delete existing files before applying',
+                    ),
+                    value: tempCleanApply,
+                    onChanged: (v) =>
+                        setState2(() => tempCleanApply = v ?? false),
+                  ),
+                ],
+              ),
             ),
             actions: [
               TextButton(
@@ -2272,7 +2481,13 @@ class _HomePageState extends State<HomePage> {
               ),
               TextButton(
                 onPressed: () {
-                  setState(() => applyConfig = tempApplyConfig);
+                  setState(() {
+                    applySavedVars = tempApplySavedVars;
+                    applyConfig = tempApplyConfig;
+                    applyBindings = tempApplyBindings;
+                    applyInterface = tempApplyInterface;
+                    cleanApply = tempCleanApply;
+                  });
                   Navigator.of(ctx).pop(true);
                 },
                 child: const Text('Apply'),
@@ -2342,7 +2557,11 @@ class _HomePageState extends State<HomePage> {
       // Apply the backup
       final err = await _applyBackupFile(
         fileToApply,
-        applyConfigWtf: applyConfig,
+        applySavedVarsFilter: applySavedVars,
+        applyConfigFilter: applyConfig,
+        applyBindingsFilter: applyBindings,
+        applyInterfaceFilter: applyInterface,
+        cleanMode: cleanApply,
       );
       messenger.hideCurrentSnackBar();
       if (!mounted) return;
@@ -2366,7 +2585,11 @@ class _HomePageState extends State<HomePage> {
   // Returns null on success, otherwise an error message
   Future<String?> _applyBackupFile(
     File archiveFile, {
-    bool applyConfigWtf = false,
+    bool applySavedVarsFilter = true,
+    bool applyConfigFilter = false,
+    bool applyBindingsFilter = true,
+    bool applyInterfaceFilter = true,
+    bool cleanMode = true,
   }) async {
     try {
       final extractDir = await Directory.systemTemp.createTemp(
@@ -2399,25 +2622,106 @@ class _HomePageState extends State<HomePage> {
         return 'Backup contains no files to restore.';
       }
 
+      // Clean mode: delete selected categories before applying
+      if (cleanMode) {
+        await _appendLog('Clean mode enabled - removing old files...');
+
+        if (wtfHasFiles &&
+            (applySavedVarsFilter ||
+                applyConfigFilter ||
+                applyBindingsFilter)) {
+          final wtfDest = Directory(wtfPath!);
+          if (wtfDest.existsSync()) {
+            await _appendLog('Cleaning WTF directory...');
+            try {
+              await wtfDest.delete(recursive: true);
+              await wtfDest.create(recursive: true);
+              await _appendLog('WTF directory cleaned');
+            } catch (e, st) {
+              await _appendLog('Failed cleaning WTF: $e\n$st');
+              return 'Failed to clean WTF directory: $e';
+            }
+          }
+        }
+
+        if (ifaceHasFiles && applyInterfaceFilter) {
+          final ifaceDest = Directory(interfacePath!);
+          if (ifaceDest.existsSync()) {
+            await _appendLog('Cleaning Interface directory...');
+            try {
+              await ifaceDest.delete(recursive: true);
+              await ifaceDest.create(recursive: true);
+              await _appendLog('Interface directory cleaned');
+            } catch (e, st) {
+              await _appendLog('Failed cleaning Interface: $e\n$st');
+              return 'Failed to clean Interface directory: $e';
+            }
+          }
+        }
+      }
+
       if (wtfHasFiles) {
         await _appendLog('Applying WTF...');
         try {
-          // If applyConfigWtf is false, exclude Config.wtf
-          if (!applyConfigWtf) {
-            final configFile = File(p.join(wtfSource.path, 'Config.wtf'));
-            if (configFile.existsSync()) {
-              await configFile.delete();
-              await _appendLog('Skipping Config.wtf (toggle is off)');
+          // Filter out files based on user selection
+          final filesToApply = <File>[];
+
+          for (final entity in wtfSource.listSync(
+            recursive: true,
+            followLinks: false,
+          )) {
+            if (entity is! File) continue;
+
+            final rel = p.relative(entity.path, from: wtfSource.path);
+            final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
+            final baseName = p.basename(entity.path).toLowerCase();
+
+            bool shouldInclude = false;
+
+            // Config.wtf
+            if (baseName == 'config.wtf') {
+              shouldInclude = applyConfigFilter;
+            }
+            // Bindings
+            else if (baseName.contains('binding') ||
+                baseName == 'bindings-cache.wtf') {
+              shouldInclude = applyBindingsFilter;
+            }
+            // SavedVariables
+            else if (parts.contains('savedvariables')) {
+              shouldInclude = applySavedVarsFilter;
+            }
+            // Other WTF files (include if any WTF filter is on)
+            else {
+              shouldInclude =
+                  applySavedVarsFilter ||
+                  applyConfigFilter ||
+                  applyBindingsFilter;
+            }
+
+            if (shouldInclude) {
+              filesToApply.add(entity);
             }
           }
-          await _copyDirectoryContents(wtfSource, Directory(wtfPath!));
+
+          if (filesToApply.isEmpty) {
+            await _appendLog('No WTF files selected to apply');
+          } else {
+            for (final file in filesToApply) {
+              final rel = p.relative(file.path, from: wtfSource.path);
+              final dest = File(p.join(wtfPath!, rel));
+              await dest.parent.create(recursive: true);
+              await file.copy(dest.path);
+            }
+            await _appendLog('Applied ${filesToApply.length} WTF file(s)');
+          }
         } catch (e, st) {
           await _appendLog('Failed copying WTF: $e\n$st');
           return 'Failed to copy WTF files: $e';
         }
       }
 
-      if (ifaceHasFiles) {
+      if (ifaceHasFiles && applyInterfaceFilter) {
         await _appendLog('Applying Interface...');
         try {
           await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
@@ -2425,6 +2729,8 @@ class _HomePageState extends State<HomePage> {
           await _appendLog('Failed copying Interface: $e\n$st');
           return 'Failed to copy Interface files: $e';
         }
+      } else if (ifaceHasFiles && !applyInterfaceFilter) {
+        await _appendLog('Skipping Interface (filter disabled)');
       }
 
       await _appendLog('Apply completed');
