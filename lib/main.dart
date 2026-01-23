@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
 import 'package:flutter/services.dart';
 
 // Services
@@ -68,24 +69,19 @@ List<int> performZip(Map<String, dynamic> args) {
     }
   }
 
-  final interfaceDirObj = Directory(interfaceDir);
-  if (includeInterface && interfaceDirObj.existsSync()) {
-    for (final entity in interfaceDirObj.listSync(
-      recursive: true,
-      followLinks: false,
-    )) {
-      if (entity is File) {
-        final rel = p.relative(entity.path, from: interfaceDir);
-        final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        if (excludeCaches &&
-            (parts.contains('cache') || parts.contains('wdb'))) {
-          continue;
+  if (includeInterface) {
+    final interfaceDirObj = Directory(interfaceDir);
+    if (interfaceDirObj.existsSync()) {
+      for (final entity in interfaceDirObj.listSync(recursive: true, followLinks: false)) {
+        if (entity is File) {
+          final rel = p.relative(entity.path, from: interfaceDir);
+          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
+          if (excludeCaches && (parts.contains('cache') || parts.contains('wdb'))) {
+            continue;
+          }
+          final store = p.join('Interface', rel);
+          addFileAt(store, entity);
         }
-        final store = p.join(
-          'Interface',
-          p.relative(entity.path, from: interfaceDir),
-        );
-        addFileAt(store, entity);
       }
     }
   }
@@ -584,7 +580,7 @@ class _HomePageState extends State<HomePage> {
         'excludeCaches': excludeCaches,
       });
 
-      if (tempDirPath.isEmpty) return null;
+      if (tempDirPath.isEmpty) throw Exception('Failed to prepare temp dir for 7z');
 
       final outFile = await _getLocalFile('waddonsync_backup_$timestamp.7z');
       final outPath = outFile.path;
@@ -688,12 +684,31 @@ class _HomePageState extends State<HomePage> {
   }) async {
     setState(() => isWorking = true);
     final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+    final backupId = const Uuid().v4();
 
     // Check if 7-Zip is available - if so, create 7z directly without ZIP
     final exe = await _find7zipExecutable();
     if (exe != null) {
       await _appendLog('7-Zip found, creating 7z archive directly...');
+      // Write metadata file with backupId
+      final tempMetaDir = await Directory.systemTemp.createTemp('waddonsync-meta-');
+      final metaFile = File('${tempMetaDir.path}/waddonsync_backup_meta.json');
+      await metaFile.writeAsString(jsonEncode({'backupId': backupId, 'timestamp': timestamp}));
+      // Prepare temp dir for 7z as before
+      final tempDirPath = await compute(prepareTempDirFor7z, {
+        'wtfDir': wtfPath ?? '',
+        'interfaceDir': interfacePath ?? '',
+        'includeSavedVars': includeSavedVars,
+        'includeConfig': includeConfig,
+        'includeBindings': includeBindings,
+        'includeInterface': includeInterface,
+        'excludeCaches': excludeCaches,
+      });
+      if (tempDirPath.isEmpty) throw Exception('Failed to prepare temp dir for 7z');
+      // Copy meta file into temp dir
+      await metaFile.copy('$tempDirPath/waddonsync_backup_meta.json');
       final outFile = await _create7zArchive(timestamp, exe);
+      await tempMetaDir.delete(recursive: true);
       if (outFile != null) {
         setState(() {
           lastZipPath = outFile.path;
@@ -708,6 +723,9 @@ class _HomePageState extends State<HomePage> {
     File outFile = await _getLocalFile('waddonsync_backup_$timestamp.zip');
 
     final archive = Archive();
+    // Add backup metadata file to archive
+    final metaContent = jsonEncode({'backupId': backupId, 'timestamp': timestamp});
+    archive.addFile(ArchiveFile('waddonsync_backup_meta.json', metaContent.length, utf8.encode(metaContent)));
 
     Future<void> addFileAt(String storePath, File file) async {
       final bytes = await file.readAsBytes();
@@ -1287,86 +1305,82 @@ class _HomePageState extends State<HomePage> {
       bool tempApplyBindings = applyBindings;
       bool tempApplyInterface = applyInterface;
       bool tempCleanApply = cleanApply;
+
       final apply = await showDialog<bool>(
         context: context,
-        builder: (ctx) => StatefulBuilder(
-          builder: (ctx2, setState2) => AlertDialog(
-            title: const Text('Backup downloaded'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SelectableText(
-                    'Downloaded "$fileName" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Select what to apply:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('SavedVariables'),
-                    subtitle: const Text('Addon settings and data'),
-                    value: tempApplySavedVars,
-                    onChanged: (v) =>
-                        setState2(() => tempApplySavedVars = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Config.wtf'),
-                    subtitle: const Text('Game settings'),
-                    value: tempApplyConfig,
-                    onChanged: (v) =>
-                        setState2(() => tempApplyConfig = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Keybindings'),
-                    subtitle: const Text('Key bindings'),
-                    value: tempApplyBindings,
-                    onChanged: (v) =>
-                        setState2(() => tempApplyBindings = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Interface'),
-                    subtitle: const Text('Addon files'),
-                    value: tempApplyInterface,
-                    onChanged: (v) =>
-                        setState2(() => tempApplyInterface = v ?? false),
-                  ),
-                  const Divider(),
-                  CheckboxListTile(
-                    title: const Text('Clean apply'),
-                    subtitle: const Text(
-                      'Delete existing files before applying',
+        builder: (ctx2) {
+          return StatefulBuilder(
+            builder: (ctx, setState2) => AlertDialog(
+              title: const Text('Backup downloaded'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SelectableText(
+                      'Downloaded "${fileName}" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
                     ),
-                    value: tempCleanApply,
-                    onChanged: (v) =>
-                        setState2(() => tempCleanApply = v ?? false),
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Select what to apply:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    CheckboxListTile(
+                      title: const Text('SavedVariables'),
+                      subtitle: const Text('Addon settings and data'),
+                      value: tempApplySavedVars,
+                      onChanged: (v) => setState2(() => tempApplySavedVars = v ?? false),
+                    ),
+                    CheckboxListTile(
+                      title: const Text('Config.wtf'),
+                      subtitle: const Text('Game settings'),
+                      value: tempApplyConfig,
+                      onChanged: (v) => setState2(() => tempApplyConfig = v ?? false),
+                    ),
+                    CheckboxListTile(
+                      title: const Text('Keybindings'),
+                      subtitle: const Text('Key bindings'),
+                      value: tempApplyBindings,
+                      onChanged: (v) => setState2(() => tempApplyBindings = v ?? false),
+                    ),
+                    CheckboxListTile(
+                      title: const Text('Interface'),
+                      subtitle: const Text('Addon files'),
+                      value: tempApplyInterface,
+                      onChanged: (v) => setState2(() => tempApplyInterface = v ?? false),
+                    ),
+                    const Divider(),
+                    CheckboxListTile(
+                      title: const Text('Clean apply'),
+                      subtitle: const Text('Delete existing files before applying'),
+                      value: tempCleanApply,
+                      onChanged: (v) => setState2(() => tempCleanApply = v ?? false),
+                    ),
+                  ],
+                ),
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      applySavedVars = tempApplySavedVars;
+                      applyConfig = tempApplyConfig;
+                      applyBindings = tempApplyBindings;
+                      applyInterface = tempApplyInterface;
+                      cleanApply = tempCleanApply;
+                    });
+                    Navigator.of(ctx).pop(true);
+                  },
+                  child: const Text('Apply'),
+                ),
+              ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    applySavedVars = tempApplySavedVars;
-                    applyConfig = tempApplyConfig;
-                    applyBindings = tempApplyBindings;
-                    applyInterface = tempApplyInterface;
-                    cleanApply = tempCleanApply;
-                  });
-                  Navigator.of(ctx).pop(true);
-                },
-                child: const Text('Apply'),
-              ),
-            ],
-          ),
-        ),
+          );
+        },
       );
 
       if (apply != true) {
@@ -1583,12 +1597,51 @@ class _HomePageState extends State<HomePage> {
           (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
         );
         for (final f in files) {
+          String? backupId;
+          try {
+            final ext = p.extension(f.path).toLowerCase();
+            if (ext == '.zip') {
+              final bytes = await f.readAsBytes();
+              final arch = ZipDecoder().decodeBytes(bytes);
+              ArchiveFile? meta;
+              try {
+                meta = arch.firstWhere((file) => file.name == 'waddonsync_backup_meta.json');
+              } catch (_) {
+                meta = null;
+              }
+              if (meta != null) {
+                final metaJson = jsonDecode(utf8.decode(meta.content)) as Map<String, dynamic>;
+                backupId = metaJson['backupId'] as String?;
+              }
+            } else if (ext == '.7z') {
+              // 7z: try to extract meta file using 7z command line
+              final tempDir = await Directory.systemTemp.createTemp('waddonsync-meta-extract-');
+              final cs = CompressionService(_appendLog);
+              final exe = await cs.find7zipExecutable();
+              if (exe != null) {
+                final proc = await Process.run(exe, [
+                  'e',
+                  f.path,
+                  'waddonsync_backup_meta.json',
+                  '-o${tempDir.path}',
+                  '-y',
+                ]);
+                final metaFile = File('${tempDir.path}/waddonsync_backup_meta.json');
+                if (await metaFile.exists()) {
+                  final metaJson = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+                  backupId = metaJson['backupId'] as String?;
+                }
+                await tempDir.delete(recursive: true);
+              }
+            }
+          } catch (_) {}
           localBackups.add({
             'type': 'local',
             'path': f.path,
             'name': p.basename(f.path),
             'size': f.lengthSync(),
             'modified': f.statSync().modified.toIso8601String(),
+            'backupId': backupId,
           });
         }
       }
@@ -1654,6 +1707,8 @@ class _HomePageState extends State<HomePage> {
                     final name = b['name'] as String;
                     final size = b['size'] as int;
                     final modified = b['modified'] as String;
+
+                    final backupId = b['backupId'] as String?;
                     final id = 'local:$path';
 
                     return ListTile(
@@ -1664,7 +1719,8 @@ class _HomePageState extends State<HomePage> {
                       ),
                       title: Text(name),
                       subtitle: Text(
-                        '$modified • ${(size / (1024 * 1024)).toStringAsFixed(2)} MB',
+                        '$modified • ${(size / (1024 * 1024)).toStringAsFixed(2)} MB'
+                        '${backupId != null ? '\nID: $backupId' : ''}',
                       ),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
