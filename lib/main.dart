@@ -72,11 +72,15 @@ List<int> performZip(Map<String, dynamic> args) {
   if (includeInterface) {
     final interfaceDirObj = Directory(interfaceDir);
     if (interfaceDirObj.existsSync()) {
-      for (final entity in interfaceDirObj.listSync(recursive: true, followLinks: false)) {
+      for (final entity in interfaceDirObj.listSync(
+        recursive: true,
+        followLinks: false,
+      )) {
         if (entity is File) {
           final rel = p.relative(entity.path, from: interfaceDir);
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          if (excludeCaches && (parts.contains('cache') || parts.contains('wdb'))) {
+          if (excludeCaches &&
+              (parts.contains('cache') || parts.contains('wdb'))) {
             continue;
           }
           final store = p.join('Interface', rel);
@@ -580,7 +584,8 @@ class _HomePageState extends State<HomePage> {
         'excludeCaches': excludeCaches,
       });
 
-      if (tempDirPath.isEmpty) throw Exception('Failed to prepare temp dir for 7z');
+      if (tempDirPath.isEmpty)
+        throw Exception('Failed to prepare temp dir for 7z');
 
       final outFile = await _getLocalFile('waddonsync_backup_$timestamp.7z');
       final outPath = outFile.path;
@@ -691,9 +696,13 @@ class _HomePageState extends State<HomePage> {
     if (exe != null) {
       await _appendLog('7-Zip found, creating 7z archive directly...');
       // Write metadata file with backupId
-      final tempMetaDir = await Directory.systemTemp.createTemp('waddonsync-meta-');
+      final tempMetaDir = await Directory.systemTemp.createTemp(
+        'waddonsync-meta-',
+      );
       final metaFile = File('${tempMetaDir.path}/waddonsync_backup_meta.json');
-      await metaFile.writeAsString(jsonEncode({'backupId': backupId, 'timestamp': timestamp}));
+      await metaFile.writeAsString(
+        jsonEncode({'backupId': backupId, 'timestamp': timestamp}),
+      );
       // Prepare temp dir for 7z as before
       final tempDirPath = await compute(prepareTempDirFor7z, {
         'wtfDir': wtfPath ?? '',
@@ -704,7 +713,8 @@ class _HomePageState extends State<HomePage> {
         'includeInterface': includeInterface,
         'excludeCaches': excludeCaches,
       });
-      if (tempDirPath.isEmpty) throw Exception('Failed to prepare temp dir for 7z');
+      if (tempDirPath.isEmpty)
+        throw Exception('Failed to prepare temp dir for 7z');
       // Copy meta file into temp dir
       await metaFile.copy('$tempDirPath/waddonsync_backup_meta.json');
       final outFile = await _create7zArchive(timestamp, exe);
@@ -724,8 +734,17 @@ class _HomePageState extends State<HomePage> {
 
     final archive = Archive();
     // Add backup metadata file to archive
-    final metaContent = jsonEncode({'backupId': backupId, 'timestamp': timestamp});
-    archive.addFile(ArchiveFile('waddonsync_backup_meta.json', metaContent.length, utf8.encode(metaContent)));
+    final metaContent = jsonEncode({
+      'backupId': backupId,
+      'timestamp': timestamp,
+    });
+    archive.addFile(
+      ArchiveFile(
+        'waddonsync_backup_meta.json',
+        metaContent.length,
+        utf8.encode(metaContent),
+      ),
+    );
 
     Future<void> addFileAt(String storePath, File file) async {
       final bytes = await file.readAsBytes();
@@ -1329,32 +1348,39 @@ class _HomePageState extends State<HomePage> {
                       title: const Text('SavedVariables'),
                       subtitle: const Text('Addon settings and data'),
                       value: tempApplySavedVars,
-                      onChanged: (v) => setState2(() => tempApplySavedVars = v ?? false),
+                      onChanged: (v) =>
+                          setState2(() => tempApplySavedVars = v ?? false),
                     ),
                     CheckboxListTile(
                       title: const Text('Config.wtf'),
                       subtitle: const Text('Game settings'),
                       value: tempApplyConfig,
-                      onChanged: (v) => setState2(() => tempApplyConfig = v ?? false),
+                      onChanged: (v) =>
+                          setState2(() => tempApplyConfig = v ?? false),
                     ),
                     CheckboxListTile(
                       title: const Text('Keybindings'),
                       subtitle: const Text('Key bindings'),
                       value: tempApplyBindings,
-                      onChanged: (v) => setState2(() => tempApplyBindings = v ?? false),
+                      onChanged: (v) =>
+                          setState2(() => tempApplyBindings = v ?? false),
                     ),
                     CheckboxListTile(
                       title: const Text('Interface'),
                       subtitle: const Text('Addon files'),
                       value: tempApplyInterface,
-                      onChanged: (v) => setState2(() => tempApplyInterface = v ?? false),
+                      onChanged: (v) =>
+                          setState2(() => tempApplyInterface = v ?? false),
                     ),
                     const Divider(),
                     CheckboxListTile(
                       title: const Text('Clean apply'),
-                      subtitle: const Text('Delete existing files before applying'),
+                      subtitle: const Text(
+                        'Delete existing files before applying',
+                      ),
                       value: tempCleanApply,
-                      onChanged: (v) => setState2(() => tempCleanApply = v ?? false),
+                      onChanged: (v) =>
+                          setState2(() => tempCleanApply = v ?? false),
                     ),
                   ],
                 ),
@@ -1605,17 +1631,23 @@ class _HomePageState extends State<HomePage> {
               final arch = ZipDecoder().decodeBytes(bytes);
               ArchiveFile? meta;
               try {
-                meta = arch.firstWhere((file) => file.name == 'waddonsync_backup_meta.json');
+                meta = arch.firstWhere(
+                  (file) => file.name == 'waddonsync_backup_meta.json',
+                );
               } catch (_) {
                 meta = null;
               }
               if (meta != null) {
-                final metaJson = jsonDecode(utf8.decode(meta.content)) as Map<String, dynamic>;
+                final metaJson =
+                    jsonDecode(utf8.decode(meta.content))
+                        as Map<String, dynamic>;
                 backupId = metaJson['backupId'] as String?;
               }
             } else if (ext == '.7z') {
               // 7z: try to extract meta file using 7z command line
-              final tempDir = await Directory.systemTemp.createTemp('waddonsync-meta-extract-');
+              final tempDir = await Directory.systemTemp.createTemp(
+                'waddonsync-meta-extract-',
+              );
               final cs = CompressionService(_appendLog);
               final exe = await cs.find7zipExecutable();
               if (exe != null) {
@@ -1626,9 +1658,13 @@ class _HomePageState extends State<HomePage> {
                   '-o${tempDir.path}',
                   '-y',
                 ]);
-                final metaFile = File('${tempDir.path}/waddonsync_backup_meta.json');
+                final metaFile = File(
+                  '${tempDir.path}/waddonsync_backup_meta.json',
+                );
                 if (await metaFile.exists()) {
-                  final metaJson = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+                  final metaJson =
+                      jsonDecode(await metaFile.readAsString())
+                          as Map<String, dynamic>;
                   backupId = metaJson['backupId'] as String?;
                 }
                 await tempDir.delete(recursive: true);
