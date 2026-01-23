@@ -2,6 +2,11 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:path/path.dart' as p;
 
+bool isHiddenOrDotDir(String path) {
+  final parts = p.split(path);
+  return parts.any((part) => part.startsWith('.'));
+}
+
 class CompressionService {
   final Function(String) log;
 
@@ -104,6 +109,11 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
     file.copySync(dest.path);
   }
 
+  bool isHiddenOrDotDir(String path) {
+    final parts = p.split(path);
+    return parts.any((part) => part.startsWith('.'));
+  }
+
   final wtfDirObj = Directory(wtfDir);
   if (wtfDirObj.existsSync()) {
     if (includeSavedVars) {
@@ -113,6 +123,7 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
       )) {
         if (entity is File) {
           final rel = p.relative(entity.path, from: wtfDir);
+          if (isHiddenOrDotDir(rel)) continue;
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
           if (parts.contains('savedvariables')) {
             final store = p.join('WTF', p.relative(entity.path, from: wtfDir));
@@ -135,7 +146,7 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
 
     if (includeConfig) {
       final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync()) {
+      if (cfg.existsSync() && !isHiddenOrDotDir('Config.wtf')) {
         copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
       }
     }
@@ -149,6 +160,7 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
     )) {
       if (entity is File) {
         final rel = p.relative(entity.path, from: interfaceDir);
+        if (isHiddenOrDotDir(rel)) continue;
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
         if (excludeCaches &&
             (parts.contains('cache') || parts.contains('wdb'))) {
@@ -192,6 +204,7 @@ List<int> performZip(Map<String, dynamic> args) {
       )) {
         if (entity is File) {
           final rel = p.relative(entity.path, from: wtfDir);
+          if (isHiddenOrDotDir(rel)) continue;
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
           if (parts.contains('savedvariables')) {
             final store = p.join('WTF', p.relative(entity.path, from: wtfDir));
@@ -214,7 +227,8 @@ List<int> performZip(Map<String, dynamic> args) {
 
     if (includeConfig) {
       final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync()) addFileAt(p.join('WTF', 'Config.wtf'), cfg);
+      if (cfg.existsSync() && !isHiddenOrDotDir('Config.wtf'))
+        addFileAt(p.join('WTF', 'Config.wtf'), cfg);
     }
   }
 
@@ -226,6 +240,7 @@ List<int> performZip(Map<String, dynamic> args) {
     )) {
       if (entity is File) {
         final rel = p.relative(entity.path, from: interfaceDir);
+        if (isHiddenOrDotDir(rel)) continue;
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
         if (excludeCaches &&
             (parts.contains('cache') || parts.contains('wdb'))) {
