@@ -109,10 +109,7 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
     file.copySync(dest.path);
   }
 
-  bool isHiddenOrDotDir(String path) {
-    final parts = p.split(path);
-    return parts.any((part) => part.startsWith('.'));
-  }
+  // Use top-level isHiddenOrDotDir function defined above
 
   final wtfDirObj = Directory(wtfDir);
   if (wtfDirObj.existsSync()) {
@@ -227,8 +224,9 @@ List<int> performZip(Map<String, dynamic> args) {
 
     if (includeConfig) {
       final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync() && !isHiddenOrDotDir('Config.wtf'))
+      if (cfg.existsSync() && !isHiddenOrDotDir('Config.wtf')) {
         addFileAt(p.join('WTF', 'Config.wtf'), cfg);
+      }
     }
   }
 

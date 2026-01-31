@@ -15,167 +15,6 @@ import 'package:flutter/services.dart';
 import 'services/google_drive_service.dart';
 import 'services/compression_service.dart';
 
-// Performs the heavy file collection and compression in a separate isolate.
-// Arguments (Map): wtfDir, interfaceDir, includeSavedVars, includeConfig,
-// includeBindings, includeInterface, excludeCaches
-List<int> performZip(Map<String, dynamic> args) {
-  final wtfDir = args['wtfDir'] as String;
-  final interfaceDir = args['interfaceDir'] as String;
-  final includeSavedVars = args['includeSavedVars'] as bool;
-  final includeConfig = args['includeConfig'] as bool;
-  final includeBindings = args['includeBindings'] as bool;
-  final includeInterface = args['includeInterface'] as bool;
-  final excludeCaches = args['excludeCaches'] as bool;
-
-  final archive = Archive();
-
-  void addFileAt(String storePath, File file) {
-    final bytes = file.readAsBytesSync();
-    archive.addFile(ArchiveFile(storePath, bytes.length, bytes));
-  }
-
-  final wtfDirObj = Directory(wtfDir);
-  if (wtfDirObj.existsSync()) {
-    if (includeSavedVars) {
-      for (final entity in wtfDirObj.listSync(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File) {
-          final rel = p.relative(entity.path, from: wtfDir);
-          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          if (parts.contains('savedvariables')) {
-            final store = p.join('WTF', p.relative(entity.path, from: wtfDir));
-            addFileAt(store, entity);
-          }
-          if (includeBindings) {
-            final baseName = p.basename(entity.path).toLowerCase();
-            if (baseName.contains('binding') ||
-                baseName == 'bindings-cache.wtf') {
-              final store = p.join(
-                'WTF',
-                p.relative(entity.path, from: wtfDir),
-              );
-              addFileAt(store, entity);
-            }
-          }
-        }
-      }
-    }
-
-    if (includeConfig) {
-      final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync()) addFileAt(p.join('WTF', 'Config.wtf'), cfg);
-    }
-  }
-
-  if (includeInterface) {
-    final interfaceDirObj = Directory(interfaceDir);
-    if (interfaceDirObj.existsSync()) {
-      for (final entity in interfaceDirObj.listSync(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File) {
-          final rel = p.relative(entity.path, from: interfaceDir);
-          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          if (excludeCaches &&
-              (parts.contains('cache') || parts.contains('wdb'))) {
-            continue;
-          }
-          final store = p.join('Interface', rel);
-          addFileAt(store, entity);
-        }
-      }
-    }
-  }
-
-  final zipEncoder = ZipEncoder();
-  final zipData = zipEncoder.encode(archive, level: Deflate.BEST_COMPRESSION)!;
-  return zipData;
-}
-
-// Prepare a temp folder mirroring the archive structure and copy the selected
-// files into it. Returns the path to the created temp folder.
-String prepareTempDirFor7z(Map<String, dynamic> args) {
-  final wtfDir = args['wtfDir'] as String;
-  final interfaceDir = args['interfaceDir'] as String;
-  final includeSavedVars = args['includeSavedVars'] as bool;
-  final includeConfig = args['includeConfig'] as bool;
-  final includeBindings = args['includeBindings'] as bool;
-  final includeInterface = args['includeInterface'] as bool;
-  final excludeCaches = args['excludeCaches'] as bool;
-
-  final tempDir = Directory.systemTemp.createTempSync('waddonsync-');
-
-  void copyFileToStore(String storePath, File file) {
-    final dest = File(p.join(tempDir.path, storePath));
-    dest.parent.createSync(recursive: true);
-    file.copySync(dest.path);
-  }
-
-  final wtfDirObj = Directory(wtfDir);
-  if (wtfDirObj.existsSync()) {
-    if (includeSavedVars) {
-      for (final entity in wtfDirObj.listSync(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File) {
-          final rel = p.relative(entity.path, from: wtfDir);
-          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          if (parts.contains('savedvariables')) {
-            final store = p.join('WTF', p.relative(entity.path, from: wtfDir));
-            copyFileToStore(store, entity);
-          }
-          if (includeBindings) {
-            final baseName = p.basename(entity.path).toLowerCase();
-            if (baseName.contains('binding') ||
-                baseName == 'bindings-cache.wtf') {
-              final store = p.join(
-                'WTF',
-                p.relative(entity.path, from: wtfDir),
-              );
-              copyFileToStore(store, entity);
-            }
-          }
-        }
-      }
-    }
-
-    if (includeConfig) {
-      final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync()) {
-        copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
-      }
-    }
-  }
-
-  final interfaceDirObj = Directory(interfaceDir);
-  if (includeInterface && interfaceDirObj.existsSync()) {
-    for (final entity in interfaceDirObj.listSync(
-      recursive: true,
-      followLinks: false,
-    )) {
-      if (entity is File) {
-        final rel = p.relative(entity.path, from: interfaceDir);
-        final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        if (excludeCaches &&
-            (parts.contains('cache') || parts.contains('wdb'))) {
-          continue;
-        }
-        final store = p.join(
-          'Interface',
-          p.relative(entity.path, from: interfaceDir),
-        );
-        copyFileToStore(store, entity);
-      }
-    }
-  }
-
-  return tempDir.path;
-}
-
 void main() {
   // Capture Flutter framework errors and run the app in a guarded zone.
   FlutterError.onError = (FlutterErrorDetails details) {
@@ -543,31 +382,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // Try to locate 7-Zip on Windows
-  Future<String?> _find7zipExecutable() async {
-    try {
-      final where = await Process.run('where', ['7z']);
-      if (where.exitCode == 0) {
-        final path = where.stdout
-            .toString()
-            .trim()
-            .split(RegExp(r'[\r\n]'))
-            .first;
-        if (path.isNotEmpty) return path;
-      }
-    } catch (e) {
-      // ignore
-    }
-    final candidates = [
-      r'C:\Program Files\7-Zip\7z.exe',
-      r'C:\Program Files (x86)\7-Zip\7z.exe',
-    ];
-    for (final c in candidates) {
-      if (File(c).existsSync()) return c;
-    }
-    return null;
-  }
-
   // Create a 7z archive directly from source files (returns null on failure)
   Future<File?> _create7zArchive(String timestamp, String exe7z) async {
     try {
@@ -584,8 +398,9 @@ class _HomePageState extends State<HomePage> {
         'excludeCaches': excludeCaches,
       });
 
-      if (tempDirPath.isEmpty)
+      if (tempDirPath.isEmpty) {
         throw Exception('Failed to prepare temp dir for 7z');
+      }
 
       final outFile = await _getLocalFile('waddonsync_backup_$timestamp.7z');
       final outPath = outFile.path;
@@ -692,7 +507,8 @@ class _HomePageState extends State<HomePage> {
     final backupId = const Uuid().v4();
 
     // Check if 7-Zip is available - if so, create 7z directly without ZIP
-    final exe = await _find7zipExecutable();
+    final compressionService = CompressionService(_appendLog);
+    final exe = await compressionService.find7zipExecutable();
     if (exe != null) {
       await _appendLog('7-Zip found, creating 7z archive directly...');
       // Write metadata file with backupId
@@ -713,8 +529,9 @@ class _HomePageState extends State<HomePage> {
         'includeInterface': includeInterface,
         'excludeCaches': excludeCaches,
       });
-      if (tempDirPath.isEmpty)
+      if (tempDirPath.isEmpty) {
         throw Exception('Failed to prepare temp dir for 7z');
+      }
       // Copy meta file into temp dir
       await metaFile.copy('$tempDirPath/waddonsync_backup_meta.json');
       final outFile = await _create7zArchive(timestamp, exe);
@@ -746,6 +563,12 @@ class _HomePageState extends State<HomePage> {
       ),
     );
 
+    // Helper to check for hidden/dot directories
+    bool isHiddenOrDotDir(String path) {
+      final parts = p.split(path);
+      return parts.any((part) => part.startsWith('.'));
+    }
+
     Future<void> addFileAt(String storePath, File file) async {
       final bytes = await file.readAsBytes();
       archive.addFile(ArchiveFile(storePath, bytes.length, bytes));
@@ -761,6 +584,8 @@ class _HomePageState extends State<HomePage> {
         )) {
           if (entity is File) {
             final rel = p.relative(entity.path, from: wtfDir);
+            // Skip hidden/dot directories
+            if (isHiddenOrDotDir(rel)) continue;
             final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
             if (parts.contains('savedvariables')) {
               final store = p.join(
@@ -801,6 +626,8 @@ class _HomePageState extends State<HomePage> {
       )) {
         if (entity is File) {
           final rel = p.relative(entity.path, from: interfaceDir);
+          // Skip hidden/dot directories
+          if (isHiddenOrDotDir(rel)) continue;
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
           if (excludeCaches &&
               (parts.contains('cache') || parts.contains('wdb'))) {
@@ -1196,269 +1023,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   // --- Restore helpers ---
-  Future<void> _loadLatestAndApply() async {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Downloading and restoring latest backup...'),
-        duration: Duration(seconds: 120),
-      ),
-    );
-
-    setState(() => isWorking = true);
-
-    try {
-      // Quick network check
-      final netOk = await _checkNetwork(host: 'www.googleapis.com');
-      if (!netOk) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Network error'),
-            content: const SelectableText(
-              'Network unreachable: could not connect to the internet.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _loadLatestAndApply();
-                },
-                child: const Text('Retry'),
-              ),
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Close'),
-              ),
-            ],
-          ),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      if (wowRootPath == null) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Missing folder'),
-            content: const Text(
-              'Please select your World of Warcraft root folder before restoring.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Close'),
-              ),
-            ],
-          ),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      _driveService ??= GoogleDriveService(_appendLog);
-
-      final initialized = await _driveService!.initialize();
-      if (!initialized) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          const SnackBar(content: Text('Failed to initialize Google Drive')),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      final backups = await _driveService!.listBackups();
-      if (backups.isEmpty) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text('No backups found in your Google Drive'),
-          ),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      final latest = backups.first;
-      final fileId = latest['fileId'] as String?;
-      final fileName = latest['name'] as String?;
-      if (fileId == null || fileName == null) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          const SnackBar(content: Text('Could not identify latest backup')),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      // Save the downloaded backup in the app folder so users can inspect it later
-      final outFile = await _getLocalFile(fileName);
-      final file = await downloadFromDrive(fileId, outFile.path);
-      if (file == null) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          const SnackBar(content: Text('Failed to download latest backup')),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      // Update local index so Show folder works
-      setState(() => lastZipPath = file.path);
-
-      // Ask user if they want to apply the downloaded backup now
-      if (!mounted) return;
-      bool tempApplySavedVars = applySavedVars;
-      bool tempApplyConfig = applyConfig;
-      bool tempApplyBindings = applyBindings;
-      bool tempApplyInterface = applyInterface;
-      bool tempCleanApply = cleanApply;
-
-      final apply = await showDialog<bool>(
-        context: context,
-        builder: (ctx2) {
-          return StatefulBuilder(
-            builder: (ctx, setState2) => AlertDialog(
-              title: const Text('Backup downloaded'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SelectableText(
-                      'Downloaded "${fileName}" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Select what to apply:',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    CheckboxListTile(
-                      title: const Text('SavedVariables'),
-                      subtitle: const Text('Addon settings and data'),
-                      value: tempApplySavedVars,
-                      onChanged: (v) =>
-                          setState2(() => tempApplySavedVars = v ?? false),
-                    ),
-                    CheckboxListTile(
-                      title: const Text('Config.wtf'),
-                      subtitle: const Text('Game settings'),
-                      value: tempApplyConfig,
-                      onChanged: (v) =>
-                          setState2(() => tempApplyConfig = v ?? false),
-                    ),
-                    CheckboxListTile(
-                      title: const Text('Keybindings'),
-                      subtitle: const Text('Key bindings'),
-                      value: tempApplyBindings,
-                      onChanged: (v) =>
-                          setState2(() => tempApplyBindings = v ?? false),
-                    ),
-                    CheckboxListTile(
-                      title: const Text('Interface'),
-                      subtitle: const Text('Addon files'),
-                      value: tempApplyInterface,
-                      onChanged: (v) =>
-                          setState2(() => tempApplyInterface = v ?? false),
-                    ),
-                    const Divider(),
-                    CheckboxListTile(
-                      title: const Text('Clean apply'),
-                      subtitle: const Text(
-                        'Delete existing files before applying',
-                      ),
-                      value: tempCleanApply,
-                      onChanged: (v) =>
-                          setState2(() => tempCleanApply = v ?? false),
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    setState(() {
-                      applySavedVars = tempApplySavedVars;
-                      applyConfig = tempApplyConfig;
-                      applyBindings = tempApplyBindings;
-                      applyInterface = tempApplyInterface;
-                      cleanApply = tempCleanApply;
-                    });
-                    Navigator.of(ctx).pop(true);
-                  },
-                  child: const Text('Apply'),
-                ),
-              ],
-            ),
-          );
-        },
-      );
-
-      if (apply != true) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          SnackBar(content: Text('Downloaded to: ${file.path}')),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-
-      // User chose to apply: extract and copy using helper
-      final err = await _applyBackupFile(
-        file,
-        applySavedVarsFilter: applySavedVars,
-        applyConfigFilter: applyConfig,
-        applyBindingsFilter: applyBindings,
-        applyInterfaceFilter: applyInterface,
-        cleanMode: cleanApply,
-      );
-      if (err != null) {
-        messenger.hideCurrentSnackBar();
-        if (!mounted) return;
-        messenger.showSnackBar(
-          SnackBar(content: Text('Failed to apply backup: $err')),
-        );
-        setState(() => isWorking = false);
-        return;
-      }
-    } catch (e, st) {
-      await _appendLog('Restore error: $e\n$st');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Restore error'),
-          content: SelectableText(e.toString()),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-    } finally {
-      setState(() => isWorking = false);
-    }
-  }
-
   Future<bool> _extractArchive(File archiveFile, String destPath) async {
     final ext = p.extension(archiveFile.path).toLowerCase();
 
@@ -1651,7 +1215,7 @@ class _HomePageState extends State<HomePage> {
               final cs = CompressionService(_appendLog);
               final exe = await cs.find7zipExecutable();
               if (exe != null) {
-                final proc = await Process.run(exe, [
+                await Process.run(exe, [
                   'e',
                   f.path,
                   'waddonsync_backup_meta.json',

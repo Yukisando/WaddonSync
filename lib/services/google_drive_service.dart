@@ -14,6 +14,7 @@ class GoogleDriveService {
 
   AccessCredentials? _credentials;
   drive.DriveApi? _driveApi;
+  http.Client? _httpClient; // Track HTTP client for proper cleanup
 
   // Folder name in Google Drive for storing backups
   static const String backupFolderName = 'WaddonSync Backups';
@@ -102,8 +103,11 @@ class GoogleDriveService {
       throw Exception('No credentials available');
     }
 
-    final client = _AuthenticatedClient(_credentials!);
-    _driveApi = drive.DriveApi(client);
+    // Close existing client if any
+    _httpClient?.close();
+    
+    _httpClient = _AuthenticatedClient(_credentials!);
+    _driveApi = drive.DriveApi(_httpClient!);
     await log('Drive API client created');
   }
 
@@ -365,6 +369,10 @@ class GoogleDriveService {
     try {
       await log('Logging out of Google Drive...');
 
+      // Clean up HTTP client
+      _httpClient?.close();
+      _httpClient = null;
+      
       _driveApi = null;
       _credentials = null;
       _backupFolderId = null;
