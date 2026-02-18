@@ -4,18 +4,18 @@ import 'dart:convert';
 import 'package:googleapis_auth/auth_io.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
+import '../config/secrets.dart';
 
 /// Google OAuth 2.0 service for desktop applications
 /// Handles the authorization code flow with local redirect
 class GoogleOAuthService {
   final Function(String) log;
 
-  // OAuth 2.0 credentials - you'll need to create these in Google Cloud Console
-  // Go to: https://console.cloud.google.com/apis/credentials
-  // Create OAuth 2.0 Client ID for Desktop application
-  static const String clientId =
-      'REDACTED_CLIENT_ID';
-  static const String clientSecret = 'REDACTED_CLIENT_SECRET';
+  // OAuth 2.0 credentials loaded from lib/config/secrets.dart (not committed to git)
+  // To set up: copy lib/config/secrets.example.dart to secrets.dart and fill in your values
+  // Get credentials from: https://console.cloud.google.com/apis/credentials
+  static const String clientId = Secrets.googleClientId;
+  static const String clientSecret = Secrets.googleClientSecret;
 
   // Required scopes for Drive file access
   static const List<String> scopes = [
