@@ -41,6 +41,17 @@ jobs:
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
         
+      - name: Generate secrets.dart
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path lib/config | Out-Null
+          @"
+          class Secrets {
+            static const String googleClientId = '${{ secrets.GOOGLE_CLIENT_ID }}';
+            static const String googleClientSecret = '${{ secrets.GOOGLE_CLIENT_SECRET }}';
+          }
+          "@ | Out-File -FilePath lib/config/secrets.dart -Encoding utf8
+
       - name: Install dependencies
         run: flutter pub get
         

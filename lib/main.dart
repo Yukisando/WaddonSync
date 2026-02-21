@@ -1718,10 +1718,12 @@ class _HomePageState extends State<HomePage> {
                           ),
                         );
 
+                        if (!ctx2.mounted) return;
                         Navigator.of(ctx2).pop();
 
                         if (apply == true) {
                           // Show applying progress
+                          if (!mounted) return;
                           showDialog(
                             context: context,
                             barrierDismissible: false,
@@ -1908,10 +1910,12 @@ class _HomePageState extends State<HomePage> {
                           ),
                         );
 
+                        if (!ctx2.mounted) return;
                         Navigator.of(ctx2).pop();
 
                         if (apply == true) {
                           // Show applying progress
+                          if (!mounted) return;
                           showDialog(
                             context: context,
                             barrierDismissible: false,
