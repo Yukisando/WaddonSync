@@ -118,9 +118,10 @@ class _HomePageState extends State<HomePage> {
 
   // Backup options
   bool includeSavedVars = true;
-  bool includeConfig = true; // default on (but only applied when user chooses)
+  bool includeConfig = false; // default off
   bool includeBindings = true;
-  bool includeInterface = false; // default off
+  bool includeInterface = true; // default on
+  bool interfaceAddonsOnly = true; // default on — only include AddOns subfolder
   bool excludeCaches = true;
 
   // Apply options (for restoring backups)
@@ -128,6 +129,7 @@ class _HomePageState extends State<HomePage> {
   bool applyConfig = false; // default off when applying
   bool applyBindings = true;
   bool applyInterface = true;
+  bool applyInterfaceAddonsOnly = true; // default on — only apply AddOns subfolder
   bool cleanApply = true; // Clean mode: delete before applying
 
   // Google Drive service
@@ -265,6 +267,7 @@ class _HomePageState extends State<HomePage> {
         includeConfig = (m['includeConfig'] as bool?) ?? includeConfig;
         includeBindings = (m['includeBindings'] as bool?) ?? includeBindings;
         includeInterface = (m['includeInterface'] as bool?) ?? includeInterface;
+        interfaceAddonsOnly = (m['interfaceAddonsOnly'] as bool?) ?? interfaceAddonsOnly;
         excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
         wowRootPath = (m['wowRootPath'] as String?) ?? wowRootPath;
       });
@@ -281,6 +284,7 @@ class _HomePageState extends State<HomePage> {
         'includeConfig': includeConfig,
         'includeBindings': includeBindings,
         'includeInterface': includeInterface,
+        'interfaceAddonsOnly': interfaceAddonsOnly,
         'excludeCaches': excludeCaches,
         'wowRootPath': wowRootPath,
       };
@@ -395,6 +399,7 @@ class _HomePageState extends State<HomePage> {
         'includeConfig': includeConfig,
         'includeBindings': includeBindings,
         'includeInterface': includeInterface,
+        'interfaceAddonsOnly': interfaceAddonsOnly,
         'excludeCaches': excludeCaches,
       });
 
@@ -500,6 +505,7 @@ class _HomePageState extends State<HomePage> {
     required bool includeConfig,
     required bool includeBindings,
     required bool includeInterface,
+    required bool interfaceAddonsOnly,
     required bool excludeCaches,
   }) async {
     setState(() => isWorking = true);
@@ -527,6 +533,7 @@ class _HomePageState extends State<HomePage> {
         'includeConfig': includeConfig,
         'includeBindings': includeBindings,
         'includeInterface': includeInterface,
+        'interfaceAddonsOnly': interfaceAddonsOnly,
         'excludeCaches': excludeCaches,
       });
       if (tempDirPath.isEmpty) {
@@ -629,6 +636,10 @@ class _HomePageState extends State<HomePage> {
           // Skip hidden/dot directories
           if (isHiddenOrDotDir(rel)) continue;
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
+          // AddOns-only filter: skip files not under AddOns/
+          if (interfaceAddonsOnly && (parts.isEmpty || parts.first != 'addons')) {
+            continue;
+          }
           if (excludeCaches &&
               (parts.contains('cache') || parts.contains('wdb'))) {
             continue;
@@ -650,6 +661,7 @@ class _HomePageState extends State<HomePage> {
       'includeConfig': includeConfig,
       'includeBindings': includeBindings,
       'includeInterface': includeInterface,
+      'interfaceAddonsOnly': interfaceAddonsOnly,
       'excludeCaches': excludeCaches,
     });
 
@@ -705,6 +717,7 @@ class _HomePageState extends State<HomePage> {
         includeConfig: includeConfig,
         includeBindings: includeBindings,
         includeInterface: includeInterface,
+        interfaceAddonsOnly: interfaceAddonsOnly,
         excludeCaches: excludeCaches,
       );
       if (!mounted) return;
@@ -767,6 +780,7 @@ class _HomePageState extends State<HomePage> {
         includeConfig: includeConfig,
         includeBindings: includeBindings,
         includeInterface: includeInterface,
+        interfaceAddonsOnly: interfaceAddonsOnly,
         excludeCaches: excludeCaches,
       );
       if (!mounted) return;
@@ -1626,6 +1640,7 @@ class _HomePageState extends State<HomePage> {
                         bool tempApplyConfig = applyConfig;
                         bool tempApplyBindings = applyBindings;
                         bool tempApplyInterface = applyInterface;
+                        bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
                         bool tempCleanApply = cleanApply;
                         final apply = await showDialog<bool>(
                           context: context,
@@ -1681,6 +1696,21 @@ class _HomePageState extends State<HomePage> {
                                         () => tempApplyInterface = v ?? false,
                                       ),
                                     ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 24.0),
+                                      child: CheckboxListTile(
+                                        title: const Text('AddOns only'),
+                                        subtitle: const Text(
+                                          'Skip other Interface folders (e.g. Icons)',
+                                        ),
+                                        value: tempApplyInterfaceAddonsOnly,
+                                        onChanged: tempApplyInterface
+                                            ? (v) => setState3(
+                                                  () => tempApplyInterfaceAddonsOnly = v ?? false,
+                                                )
+                                            : null,
+                                      ),
+                                    ),
                                     const Divider(),
                                     CheckboxListTile(
                                       title: const Text('Clean apply'),
@@ -1707,6 +1737,7 @@ class _HomePageState extends State<HomePage> {
                                       applyConfig = tempApplyConfig;
                                       applyBindings = tempApplyBindings;
                                       applyInterface = tempApplyInterface;
+                                      applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
                                       cleanApply = tempCleanApply;
                                     });
                                     Navigator.of(ctx).pop(true);
@@ -1744,6 +1775,7 @@ class _HomePageState extends State<HomePage> {
                             applyConfigFilter: applyConfig,
                             applyBindingsFilter: applyBindings,
                             applyInterfaceFilter: applyInterface,
+                            applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnly,
                             cleanMode: cleanApply,
                           );
 
@@ -1818,6 +1850,7 @@ class _HomePageState extends State<HomePage> {
                         bool tempApplyConfig = applyConfig;
                         bool tempApplyBindings = applyBindings;
                         bool tempApplyInterface = applyInterface;
+                        bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
                         bool tempCleanApply = cleanApply;
                         final apply = await showDialog<bool>(
                           context: context,
@@ -1873,6 +1906,21 @@ class _HomePageState extends State<HomePage> {
                                         () => tempApplyInterface = v ?? false,
                                       ),
                                     ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 24.0),
+                                      child: CheckboxListTile(
+                                        title: const Text('AddOns only'),
+                                        subtitle: const Text(
+                                          'Skip other Interface folders (e.g. Icons)',
+                                        ),
+                                        value: tempApplyInterfaceAddonsOnly,
+                                        onChanged: tempApplyInterface
+                                            ? (v) => setState3(
+                                                  () => tempApplyInterfaceAddonsOnly = v ?? false,
+                                                )
+                                            : null,
+                                      ),
+                                    ),
                                     const Divider(),
                                     CheckboxListTile(
                                       title: const Text('Clean apply'),
@@ -1899,6 +1947,7 @@ class _HomePageState extends State<HomePage> {
                                       applyConfig = tempApplyConfig;
                                       applyBindings = tempApplyBindings;
                                       applyInterface = tempApplyInterface;
+                                      applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
                                       cleanApply = tempCleanApply;
                                     });
                                     Navigator.of(ctx).pop(true);
@@ -1936,6 +1985,7 @@ class _HomePageState extends State<HomePage> {
                             applyConfigFilter: applyConfig,
                             applyBindingsFilter: applyBindings,
                             applyInterfaceFilter: applyInterface,
+                            applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnly,
                             cleanMode: cleanApply,
                           );
 
@@ -2074,6 +2124,7 @@ class _HomePageState extends State<HomePage> {
       bool tempApplyConfig = applyConfig;
       bool tempApplyBindings = applyBindings;
       bool tempApplyInterface = applyInterface;
+      bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
       bool tempCleanApply = cleanApply;
       final result = await showDialog<bool>(
         context: context,
@@ -2121,6 +2172,21 @@ class _HomePageState extends State<HomePage> {
                     onChanged: (v) =>
                         setState2(() => tempApplyInterface = v ?? false),
                   ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 24.0),
+                    child: CheckboxListTile(
+                      title: const Text('AddOns only'),
+                      subtitle: const Text(
+                        'Skip other Interface folders (e.g. Icons)',
+                      ),
+                      value: tempApplyInterfaceAddonsOnly,
+                      onChanged: tempApplyInterface
+                          ? (v) => setState2(
+                                () => tempApplyInterfaceAddonsOnly = v ?? false,
+                              )
+                          : null,
+                    ),
+                  ),
                   const Divider(),
                   CheckboxListTile(
                     title: const Text('Clean apply'),
@@ -2146,6 +2212,7 @@ class _HomePageState extends State<HomePage> {
                     applyConfig = tempApplyConfig;
                     applyBindings = tempApplyBindings;
                     applyInterface = tempApplyInterface;
+                    applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
                     cleanApply = tempCleanApply;
                   });
                   Navigator.of(ctx).pop(true);
@@ -2221,6 +2288,7 @@ class _HomePageState extends State<HomePage> {
         applyConfigFilter: applyConfig,
         applyBindingsFilter: applyBindings,
         applyInterfaceFilter: applyInterface,
+        applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnly,
         cleanMode: cleanApply,
       );
       messenger.hideCurrentSnackBar();
@@ -2249,6 +2317,7 @@ class _HomePageState extends State<HomePage> {
     bool applyConfigFilter = false,
     bool applyBindingsFilter = true,
     bool applyInterfaceFilter = true,
+    bool applyInterfaceAddonsOnlyFilter = true,
     bool cleanMode = true,
   }) async {
     try {
@@ -2305,16 +2374,32 @@ class _HomePageState extends State<HomePage> {
         }
 
         if (ifaceHasFiles && applyInterfaceFilter) {
-          final ifaceDest = Directory(interfacePath!);
-          if (ifaceDest.existsSync()) {
-            await _appendLog('Cleaning Interface directory...');
-            try {
-              await ifaceDest.delete(recursive: true);
-              await ifaceDest.create(recursive: true);
-              await _appendLog('Interface directory cleaned');
-            } catch (e, st) {
-              await _appendLog('Failed cleaning Interface: $e\n$st');
-              return 'Failed to clean Interface directory: $e';
+          if (applyInterfaceAddonsOnlyFilter) {
+            // Only clean the AddOns subfolder inside Interface
+            final addonsDest = Directory(p.join(interfacePath!, 'AddOns'));
+            if (addonsDest.existsSync()) {
+              await _appendLog('Cleaning Interface/AddOns directory...');
+              try {
+                await addonsDest.delete(recursive: true);
+                await addonsDest.create(recursive: true);
+                await _appendLog('Interface/AddOns directory cleaned');
+              } catch (e, st) {
+                await _appendLog('Failed cleaning Interface/AddOns: $e\n$st');
+                return 'Failed to clean Interface/AddOns directory: $e';
+              }
+            }
+          } else {
+            final ifaceDest = Directory(interfacePath!);
+            if (ifaceDest.existsSync()) {
+              await _appendLog('Cleaning Interface directory...');
+              try {
+                await ifaceDest.delete(recursive: true);
+                await ifaceDest.create(recursive: true);
+                await _appendLog('Interface directory cleaned');
+              } catch (e, st) {
+                await _appendLog('Failed cleaning Interface: $e\n$st');
+                return 'Failed to clean Interface directory: $e';
+              }
             }
           }
         }
@@ -2382,12 +2467,31 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (ifaceHasFiles && applyInterfaceFilter) {
-        await _appendLog('Applying Interface...');
-        try {
-          await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
-        } catch (e, st) {
-          await _appendLog('Failed copying Interface: $e\n$st');
-          return 'Failed to copy Interface files: $e';
+        if (applyInterfaceAddonsOnlyFilter) {
+          // Only apply files under Interface/AddOns/
+          await _appendLog('Applying Interface/AddOns only...');
+          final addonsSource = Directory(p.join(ifaceSource.path, 'AddOns'));
+          if (addonsSource.existsSync()) {
+            try {
+              await _copyDirectoryContents(
+                addonsSource,
+                Directory(p.join(interfacePath!, 'AddOns')),
+              );
+            } catch (e, st) {
+              await _appendLog('Failed copying Interface/AddOns: $e\n$st');
+              return 'Failed to copy Interface/AddOns files: $e';
+            }
+          } else {
+            await _appendLog('No AddOns folder found in backup Interface');
+          }
+        } else {
+          await _appendLog('Applying Interface...');
+          try {
+            await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
+          } catch (e, st) {
+            await _appendLog('Failed copying Interface: $e\n$st');
+            return 'Failed to copy Interface files: $e';
+          }
         }
       } else if (ifaceHasFiles && !applyInterfaceFilter) {
         await _appendLog('Skipping Interface (filter disabled)');
@@ -2613,12 +2717,28 @@ class _HomePageState extends State<HomePage> {
                     }),
                   ),
                   CheckboxListTile(
-                    title: const Text('Interface (addons) — optional'),
+                    title: const Text('Interface (addons)'),
                     value: includeInterface,
                     onChanged: (v) => setState(() {
                       includeInterface = v ?? false;
                       _saveSettings(showSnack: false);
                     }),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 24.0),
+                    child: CheckboxListTile(
+                      title: const Text('AddOns only'),
+                      subtitle: const Text(
+                        'Skip other Interface folders (e.g. Icons)',
+                      ),
+                      value: interfaceAddonsOnly,
+                      onChanged: includeInterface
+                          ? (v) => setState(() {
+                                interfaceAddonsOnly = v ?? false;
+                                _saveSettings(showSnack: false);
+                              })
+                          : null,
+                    ),
                   ),
                   CheckboxListTile(
                     title: const Text('Exclude Cache/WDB folders'),

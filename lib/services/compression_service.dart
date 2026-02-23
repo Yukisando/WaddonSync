@@ -99,6 +99,7 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
   final includeConfig = args['includeConfig'] as bool;
   final includeBindings = args['includeBindings'] as bool;
   final includeInterface = args['includeInterface'] as bool;
+  final interfaceAddonsOnly = (args['interfaceAddonsOnly'] as bool?) ?? false;
   final excludeCaches = args['excludeCaches'] as bool;
 
   final tempDir = Directory.systemTemp.createTempSync('waddonsync-');
@@ -159,6 +160,10 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
         final rel = p.relative(entity.path, from: interfaceDir);
         if (isHiddenOrDotDir(rel)) continue;
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
+        // AddOns-only filter: skip files not under AddOns/
+        if (interfaceAddonsOnly && (parts.isEmpty || parts.first != 'addons')) {
+          continue;
+        }
         if (excludeCaches &&
             (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
@@ -183,6 +188,7 @@ List<int> performZip(Map<String, dynamic> args) {
   final includeConfig = args['includeConfig'] as bool;
   final includeBindings = args['includeBindings'] as bool;
   final includeInterface = args['includeInterface'] as bool;
+  final interfaceAddonsOnly = (args['interfaceAddonsOnly'] as bool?) ?? false;
   final excludeCaches = args['excludeCaches'] as bool;
 
   final archive = Archive();
@@ -240,6 +246,10 @@ List<int> performZip(Map<String, dynamic> args) {
         final rel = p.relative(entity.path, from: interfaceDir);
         if (isHiddenOrDotDir(rel)) continue;
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
+        // AddOns-only filter: skip files not under AddOns/
+        if (interfaceAddonsOnly && (parts.isEmpty || parts.first != 'addons')) {
+          continue;
+        }
         if (excludeCaches &&
             (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
