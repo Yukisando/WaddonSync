@@ -767,10 +767,13 @@ class _HomePageState extends State<HomePage> {
     final messenger = ScaffoldMessenger.of(context);
     try {
       // make the user aware we are zipping first
+      // Use a long duration so the snackbar stays until uploadFileAndRegister
+      // manually dismisses it — prevents a silent gap when 7-zip compression
+      // takes longer than a short timer would allow.
       messenger.showSnackBar(
         const SnackBar(
           content: Text('Zipping...'),
-          duration: Duration(seconds: 30),
+          duration: Duration(hours: 1),
         ),
       );
       final zip = await createZip(
@@ -2767,12 +2770,12 @@ class _HomePageState extends State<HomePage> {
                             : const Text('Create New Backup'),
                       ),
                       const SizedBox(width: 4),
-                      // Upload icon button
+                      // Zip and Upload icon button
                       IconButton(
                         icon: const Icon(Icons.upload),
-                        tooltip: 'Upload Latest Backup to Google Drive',
-                        onPressed: (lastZipPath != null && !isWorking)
-                            ? uploadLatestAndRegister
+                        tooltip: 'Zip and Upload to Google Drive',
+                        onPressed: (wowRootPath != null && !isWorking)
+                            ? handleUploadAndRegister
                             : null,
                       ),
                       const SizedBox(width: 8),
