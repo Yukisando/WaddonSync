@@ -1,6 +1,6 @@
 # WaddonSync
 
-WaddonSync is a small Windows app that makes it easy to back up and restore your World of Warcraft interface.
+WaddonSync is a small Windows app that makes it easy to back up and restore your World of Warcraft addons.
 
 What it does now:
 
@@ -10,7 +10,6 @@ What it does now:
 - Download online backups to your machine and apply them to your WoW folders.
 - Apply local backups (with an opt-in toggle to include Config.wtf during restore).
 - Manage backups from a single dialog (download/upload/delete, view sizes in MB).
-- Show progress and clear status messages for multi-step actions like download → apply.
 
 Platform:
 
@@ -22,4 +21,4 @@ Future ideas (not implemented yet):
 - Scheduled/automatic backups and retention policies
 - Per-backup notes
 
-If you need a tool that simply backs up and restores your WoW addons and settings, WaddonSync is built for that. If you want any of the future items above, let me know and we can prioritize them.
+If you need a tool that simply backs up and restores your WoW addons and settings, WaddonSync is built for that. If you want any of the future items above, let me know and I can prioritize them.
