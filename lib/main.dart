@@ -6,14 +6,17 @@ import 'package:archive/archive.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter/services.dart';
 
 // Services
 import 'services/google_drive_service.dart';
 import 'services/compression_service.dart';
+import 'services/app_update_service.dart';
 
 void main() {
   // Capture Flutter framework errors and run the app in a guarded zone.
@@ -134,6 +137,10 @@ class _HomePageState extends State<HomePage> {
 
   // Google Drive service
   GoogleDriveService? _driveService;
+  final AppUpdateService _updateService = AppUpdateService();
+  bool _isCheckingForUpdates = false;
+  String _updateProgressLabel = '';
+  double? _updateProgressValue;
 
   // Live log streaming
   final List<String> _liveLogs = [];
@@ -2025,6 +2032,315 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _performOneClickUpdate() async {
+    if (_isCheckingForUpdates) return;
+
+    final proceed = await _confirmUpdateWarning();
+    if (!proceed) return;
+    if (!mounted) return;
+
+    setState(() {
+      _isCheckingForUpdates = true;
+      _updateProgressLabel = 'Checking for updates...';
+      _updateProgressValue = null;
+    });
+    try {
+      final packageInfo = await PackageInfo.fromPlatform();
+      final result = await _updateService.checkForUpdates(
+        currentVersion: packageInfo.version,
+        currentBuild: packageInfo.buildNumber,
+      );
+
+      if (!mounted) return;
+
+      if (result.message != null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(result.message!)));
+        return;
+      }
+
+      if (!result.hasUpdate) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'You are up to date (${result.currentVersion}).',
+            ),
+          ),
+        );
+        return;
+      }
+
+      final release = result.release;
+      if (release == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Update found, but release metadata is incomplete.'),
+          ),
+        );
+        return;
+      }
+
+      final asset = _updateService.getPreferredWindowsZipAsset(release);
+      if (asset == null || asset.downloadUrl.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No Windows zip asset found in the latest release.'),
+          ),
+        );
+        return;
+      }
+
+      await _appendLog('One-click update started to ${result.latestVersion}');
+      _setUpdateProgress('Preparing download...', progress: 0.05);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Downloading update ${result.latestVersion}...'),
+          duration: const Duration(minutes: 2),
+        ),
+      );
+
+      final stageDir = await Directory.systemTemp.createTemp(
+        'waddonsync_update_stage_',
+      );
+      final downloadedZip = File(p.join(stageDir.path, asset.name));
+
+      await _downloadUpdateZip(
+        asset.downloadUrl,
+        downloadedZip,
+        onProgress: (received, total) {
+          if (total != null && total > 0) {
+            final pct = received / total;
+            final mapped = 0.10 + (pct * 0.60);
+            _setUpdateProgress(
+              'Downloading update... ${(pct * 100).toStringAsFixed(0)}%',
+              progress: mapped.clamp(0.10, 0.70),
+            );
+          } else {
+            _setUpdateProgress('Downloading update...', progress: null);
+          }
+        },
+      );
+
+      _setUpdateProgress('Extracting update files...', progress: 0.72);
+      await _extractZipToDirectory(
+        downloadedZip,
+        stageDir,
+        onProgress: (processed, total) {
+          if (total <= 0) return;
+          final pct = processed / total;
+          final mapped = 0.72 + (pct * 0.20);
+          _setUpdateProgress(
+            'Extracting update files... ${(pct * 100).toStringAsFixed(0)}%',
+            progress: mapped.clamp(0.72, 0.92),
+          );
+        },
+      );
+
+      final appExePath = Platform.resolvedExecutable;
+      final appDir = Directory(p.dirname(appExePath));
+      _setUpdateProgress('Preparing installer...', progress: 0.94);
+      final scriptPath = await _createUpdaterScript(
+        sourceDir: stageDir.path,
+        targetDir: appDir.path,
+        appExePath: appExePath,
+      );
+
+      await _appendLog('Launching updater script: $scriptPath');
+      _setUpdateProgress('Installing update...', progress: 0.98);
+      await Process.start('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptPath,
+      ], mode: ProcessStartMode.detached);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Installing update now. App will restart automatically.'),
+        ),
+      );
+
+      // Give the snackbar a brief moment to paint before exiting.
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      exit(0);
+    } catch (e) {
+      await _appendLog('One-click update failed: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Update failed: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCheckingForUpdates = false;
+          _updateProgressLabel = '';
+          _updateProgressValue = null;
+        });
+      }
+    }
+  }
+
+  void _setUpdateProgress(String label, {double? progress}) {
+    if (!mounted) return;
+    setState(() {
+      _updateProgressLabel = label;
+      _updateProgressValue = progress;
+    });
+  }
+
+  Future<bool> _confirmUpdateWarning() async {
+    final appExePath = Platform.resolvedExecutable.toLowerCase();
+    final likelyProtected =
+        appExePath.contains('\\program files\\') ||
+        appExePath.contains('\\windows\\');
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('One-click update warning'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'One-click update only works in unprotected directories.',
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'If the app is in Program Files or another protected path, the update may fail due to permissions.',
+            ),
+            if (likelyProtected) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'Detected: this installation looks like a protected directory.',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed == true;
+  }
+
+  Future<void> _downloadUpdateZip(
+    String url,
+    File destination, {
+    void Function(int received, int? total)? onProgress,
+  }) async {
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse(url));
+      final response = await client.send(request).timeout(
+        const Duration(minutes: 3),
+      );
+      if (response.statusCode != 200) {
+        throw Exception('Download failed with HTTP ${response.statusCode}');
+      }
+
+      final sink = destination.openWrite();
+      var received = 0;
+      final total = response.contentLength;
+      await for (final chunk in response.stream) {
+        received += chunk.length;
+        sink.add(chunk);
+        onProgress?.call(received, total);
+      }
+      await sink.flush();
+      await sink.close();
+
+      if (!await destination.exists()) {
+        throw Exception('Downloaded file is missing');
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> _extractZipToDirectory(
+    File zipFile,
+    Directory outputDir, {
+    void Function(int processed, int total)? onProgress,
+  }) async {
+    final bytes = await zipFile.readAsBytes();
+    final archive = ZipDecoder().decodeBytes(bytes);
+    final total = archive.length;
+    var processed = 0;
+
+    for (final file in archive) {
+      final outPath = p.join(outputDir.path, file.name);
+      if (file.isFile) {
+        final outFile = File(outPath);
+        await outFile.parent.create(recursive: true);
+        final content = file.content;
+        if (content is List<int>) {
+          await outFile.writeAsBytes(content, flush: true);
+        }
+      } else {
+        await Directory(outPath).create(recursive: true);
+      }
+      processed++;
+      onProgress?.call(processed, total);
+    }
+  }
+
+  Future<String> _createUpdaterScript({
+    required String sourceDir,
+    required String targetDir,
+    required String appExePath,
+  }) async {
+    final scriptFile = File(
+      p.join(Directory.systemTemp.path, 'waddonsync_updater.ps1'),
+    );
+    final processName = p.basenameWithoutExtension(appExePath);
+    final escapedSource = sourceDir.replaceAll("'", "''");
+    final escapedTarget = targetDir.replaceAll("'", "''");
+    final escapedExe = appExePath.replaceAll("'", "''");
+    final escapedProcessName = processName.replaceAll("'", "''");
+
+    final script = '''
+
+Start-Sleep -Seconds 2
+
+
+for (
+  \$i = 0;
+  \$i -lt 60;
+  \$i++
+) {
+  \$p = Get-Process -Name '$escapedProcessName' -ErrorAction SilentlyContinue
+  if (-not \$p) { break }
+  Start-Sleep -Milliseconds 500
+}
+
+try {
+  Copy-Item -Path '$escapedSource\\*' -Destination '$escapedTarget' -Recurse -Force
+  Start-Process -FilePath '$escapedExe'
+} catch {
+  Write-Error \$_
+}
+''';
+
+    await scriptFile.writeAsString(script, flush: true);
+    return scriptFile.path;
+  }
+
   Future<void> _applyLatestLocal() async {
     final messenger = ScaffoldMessenger.of(context);
 
@@ -2804,7 +3120,50 @@ class _HomePageState extends State<HomePage> {
                         tooltip: 'Manage Backups',
                         onPressed: (!isWorking) ? _showManageBackups : null,
                       ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: _isCheckingForUpdates
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.system_update_alt),
+                        tooltip: 'Update app',
+                        onPressed: _isCheckingForUpdates
+                            ? null
+                            : _performOneClickUpdate,
+                      ),
                     ],
+                  ),
+
+                  if (_isCheckingForUpdates) ...[
+                    const SizedBox(height: 12),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _updateProgressLabel.isEmpty
+                                  ? 'Updating...'
+                                  : _updateProgressLabel,
+                            ),
+                            const SizedBox(height: 8),
+                            LinearProgressIndicator(value: _updateProgressValue),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Warning: One-click update only works reliably in unprotected directories (not Program Files).',
+                    style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
                   ),
 
                   const SizedBox(height: 12),
