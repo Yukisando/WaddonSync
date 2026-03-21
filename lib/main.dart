@@ -143,6 +143,7 @@ class _HomePageState extends State<HomePage> {
   String _updateProgressLabel = '';
   double? _updateProgressValue;
   String? _installedReleaseTag;
+  String _appVersionHint = '';
 
   // Live log streaming
   final List<String> _liveLogs = [];
@@ -206,6 +207,11 @@ class _HomePageState extends State<HomePage> {
   Future<File> _getUpdateStateFile() async =>
       _getLocalFile('update_state.json');
 
+  Future<File> _getUpdaterStatusFile() async {
+    final exeDir = Directory(p.dirname(Platform.resolvedExecutable));
+    return File(p.join(exeDir.path, 'waddonsync_update_status.json'));
+  }
+
   Future<Map<String, dynamic>> _readUpdateState() async {
     try {
       final f = await _getUpdateStateFile();
@@ -224,6 +230,30 @@ class _HomePageState extends State<HomePage> {
     await f.writeAsString(jsonEncode(state), flush: true);
   }
 
+  Future<Map<String, dynamic>?> _readUpdaterStatus() async {
+    try {
+      final f = await _getUpdaterStatusFile();
+      if (!await f.exists()) return null;
+      final raw = await f.readAsString();
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return decoded;
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _deleteUpdaterStatusFile() async {
+    try {
+      final f = await _getUpdaterStatusFile();
+      if (await f.exists()) {
+        await f.delete();
+      }
+    } catch (_) {
+      // best effort
+    }
+  }
+
   Future<void> _initializeUpdateState() async {
     final state = await _readUpdateState();
     if (!mounted) return;
@@ -234,11 +264,31 @@ class _HomePageState extends State<HomePage> {
     if (pendingTag == null || pendingTag.isEmpty) return;
 
     final packageInfo = await PackageInfo.fromPlatform();
-    final applied = _isPendingUpdateApplied(
+    var applied = _isPendingUpdateApplied(
       packageVersion: packageInfo.version,
       packageBuild: packageInfo.buildNumber,
       pendingTag: pendingTag,
     );
+    var relaunchFailed = false;
+    String? updaterError;
+
+    if (!applied) {
+      final updaterStatus = await _readUpdaterStatus();
+      final statusTag = updaterStatus?['tag'] as String?;
+      final copied = updaterStatus?['copied'] == true;
+      final launched = updaterStatus?['launched'] == true;
+      final error = updaterStatus?['error'] as String?;
+
+      if (statusTag == pendingTag && copied) {
+        applied = true;
+        relaunchFailed = !launched;
+        updaterError = error;
+        await _appendLog(
+          'Pending update confirmed by updater status for $pendingTag '
+          '(launch success: $launched).',
+        );
+      }
+    }
 
     if (!applied) {
       await _appendLog(
@@ -250,6 +300,7 @@ class _HomePageState extends State<HomePage> {
       state.remove('pendingNotes');
       state.remove('pendingName');
       await _writeUpdateState(state);
+      await _deleteUpdaterStatusFile();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -271,6 +322,7 @@ class _HomePageState extends State<HomePage> {
     state.remove('pendingNotes');
     state.remove('pendingName');
     await _writeUpdateState(state);
+    await _deleteUpdaterStatusFile();
     _installedReleaseTag = pendingTag;
 
     if (!mounted) return;
@@ -287,6 +339,14 @@ class _HomePageState extends State<HomePage> {
               Text('Version changed: $pendingFrom -> $pendingTag'),
               const SizedBox(height: 6),
               Text('Installed release: $pendingTag'),
+              if (relaunchFailed) ...[
+                const SizedBox(height: 8),
+                Text(
+                  updaterError?.isEmpty ?? true
+                      ? 'Update applied, but auto-reopen failed. The app was reopened manually.'
+                      : 'Update applied, but auto-reopen failed: $updaterError',
+                ),
+              ],
               const SizedBox(height: 8),
               Text(
                 pendingName,
@@ -542,6 +602,10 @@ class _HomePageState extends State<HomePage> {
   Future<void> _logAppVersionOnStartup() async {
     try {
       final info = await PackageInfo.fromPlatform();
+      final hint = 'v${info.version}+${info.buildNumber}';
+      if (mounted) {
+        setState(() => _appVersionHint = hint);
+      }
       await _appendLog(
         'App launch version: ${info.version}+${info.buildNumber}',
       );
@@ -2340,6 +2404,7 @@ class _HomePageState extends State<HomePage> {
         sourceDir: payloadDir.path,
         targetDir: appDir.path,
         appExePath: appExePath,
+        pendingTag: result.latestVersion,
       );
 
       await _appendLog('Launching updater script: $scriptPath');
@@ -2535,6 +2600,7 @@ class _HomePageState extends State<HomePage> {
     required String sourceDir,
     required String targetDir,
     required String appExePath,
+    required String pendingTag,
   }) async {
     final scriptFile = File(
       p.join(Directory.systemTemp.path, 'waddonsync_updater.ps1'),
@@ -2544,6 +2610,7 @@ class _HomePageState extends State<HomePage> {
     final escapedTarget = targetDir.replaceAll("'", "''");
     final escapedExe = appExePath.replaceAll("'", "''");
     final escapedProcessName = processName.replaceAll("'", "''");
+    final escapedPendingTag = pendingTag.replaceAll("'", "''");
 
     final script =
         '''
@@ -2562,6 +2629,7 @@ for (
 }
 
 try {
+  \$statusPath = '$escapedTarget\\waddonsync_update_status.json'
   \$copied = \$false
   for (\$c = 0; \$c -lt 30; \$c++) {
     try {
@@ -2574,6 +2642,7 @@ try {
   }
 
   if (-not \$copied) {
+    @{ tag = '$escapedPendingTag'; copied = \$false; launched = \$false; error = 'Failed to copy update files to target directory.'; at = (Get-Date).ToString('o') } | ConvertTo-Json -Compress | Set-Content -Path \$statusPath -Encoding UTF8
     throw 'Failed to copy update files to target directory.'
   }
 
@@ -2590,18 +2659,28 @@ try {
 
   if (-not \$started) {
     try {
-      Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start "" "$escapedExe"' -WorkingDirectory '$escapedTarget'
+      Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start "" """$escapedExe"""' -WorkingDirectory '$escapedTarget'
       \$started = \$true
     } catch {
       # fallback failed
     }
   }
 
+  if (\$started) {
+    @{ tag = '$escapedPendingTag'; copied = \$true; launched = \$true; error = ''; at = (Get-Date).ToString('o') } | ConvertTo-Json -Compress | Set-Content -Path \$statusPath -Encoding UTF8
+  }
+
   if (-not \$started) {
+    @{ tag = '$escapedPendingTag'; copied = \$true; launched = \$false; error = 'Failed to relaunch app after update.'; at = (Get-Date).ToString('o') } | ConvertTo-Json -Compress | Set-Content -Path \$statusPath -Encoding UTF8
     Add-Content -Path '$escapedTarget\\waddonsync_updater_error.log' -Value 'Failed to relaunch app after update.'
   }
 } catch {
   Write-Error \$_
+  try {
+    @{ tag = '$escapedPendingTag'; copied = \$false; launched = \$false; error = \$_.Exception.Message; at = (Get-Date).ToString('o') } | ConvertTo-Json -Compress | Set-Content -Path '$escapedTarget\\waddonsync_update_status.json' -Encoding UTF8
+  } catch {
+    # ignore status write failures
+  }
   Add-Content -Path '$escapedTarget\\waddonsync_updater_error.log' -Value \$_
 }
 ''';
@@ -3210,6 +3289,17 @@ try {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (_appVersionHint.isNotEmpty)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        _appVersionHint,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  if (_appVersionHint.isNotEmpty) const SizedBox(height: 8),
                   const Text(
                     'World of Warcraft folder (Windows)',
                     style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
