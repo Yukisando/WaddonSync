@@ -25,18 +25,28 @@ jobs:
         with:
           channel: 'stable'
           
-      - name: Get project version
+      - name: Compute release version
         id: version
         shell: pwsh
         run: |
           $content = Get-Content pubspec.yaml -Raw
-          if ($content -match 'version:\s+(\S+)') {
-            $version = $matches[1]
-            echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-            echo "Version: $version"
-          } else {
-            echo "VERSION=1.0.0" >> $env:GITHUB_OUTPUT
+          $major = 1
+          $minor = 0
+
+          if ($content -match 'version:\s+(\d+)\.(\d+)\.(\d+)(?:\+(\d+))?') {
+            $major = [int]$matches[1]
+            $minor = [int]$matches[2]
           }
+
+          # Smart bump on every push to main:
+          # keep major/minor from pubspec and use run_number as patch/build.
+          $patch = [int]"${{ github.run_number }}"
+          $build = [int]"${{ github.run_number }}"
+          $version = "$major.$minor.$patch"
+
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "BUILD_NUMBER=$build" >> $env:GITHUB_OUTPUT
+          echo "Computed Version: $version+$build"
           
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
@@ -56,7 +66,7 @@ jobs:
         run: flutter pub get
         
       - name: Build Windows executable
-        run: flutter build windows --release
+        run: flutter build windows --release --build-name ${{ steps.version.outputs.VERSION }} --build-number ${{ steps.version.outputs.BUILD_NUMBER }}
         
       - name: Create release archive
         shell: pwsh
@@ -84,6 +94,7 @@ jobs:
           ## WaddonSync Windows Release
           
           **Version:** ${{ steps.version.outputs.VERSION }}
+          **Build:** ${{ steps.version.outputs.BUILD_NUMBER }}
           **Build Date:** $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
           
           ### Installation
@@ -110,8 +121,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.version.outputs.VERSION }}-build.${{ github.run_number }}
-          name: WaddonSync v${{ steps.version.outputs.VERSION }} (Build ${{ github.run_number }})
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: WaddonSync v${{ steps.version.outputs.VERSION }}
           body_path: release_notes.md
           files: |
             ${{ steps.archive.outputs.RELEASE_NAME }}.zip

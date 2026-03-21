@@ -231,6 +231,29 @@ class _HomePageState extends State<HomePage> {
     final pendingTag = state['pendingTag'] as String?;
     if (pendingTag == null || pendingTag.isEmpty) return;
 
+    final packageInfo = await PackageInfo.fromPlatform();
+    final currentSemver = _extractSemver(packageInfo.version);
+    final pendingSemver = _extractSemver(pendingTag);
+
+    if (currentSemver == null || pendingSemver == null || currentSemver != pendingSemver) {
+      await _appendLog(
+        'Update pending marker ignored because running version '
+        '${packageInfo.version} does not match pending tag $pendingTag',
+      );
+      state.remove('pendingTag');
+      state.remove('pendingFromVersion');
+      state.remove('pendingNotes');
+      state.remove('pendingName');
+      await _writeUpdateState(state);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Previous update did not complete. App stayed on current version.'),
+        ),
+      );
+      return;
+    }
+
     final pendingFrom = state['pendingFromVersion'] as String? ?? 'unknown';
     final pendingNotes = state['pendingNotes'] as String? ?? '';
     final pendingName = state['pendingName'] as String? ?? pendingTag;
@@ -288,6 +311,12 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
     );
+  }
+
+  String? _extractSemver(String input) {
+    final m = RegExp(r'v?(\d+\.\d+\.\d+)').firstMatch(input);
+    if (m == null) return null;
+    return m.group(1);
   }
 
   // Very simple Windows auto-detect: check common Program Files locations
@@ -2432,17 +2461,47 @@ for (
 }
 
 try {
-  Copy-Item -Path '$escapedSource\\*' -Destination '$escapedTarget' -Recurse -Force
-  for (\$r = 0; \$r -lt 10; \$r++) {
+  \$copied = \$false
+  for (\$c = 0; \$c -lt 30; \$c++) {
     try {
-      Start-Process -FilePath '$escapedExe' -WorkingDirectory '$escapedTarget'
+      Copy-Item -Path '$escapedSource\\*' -Destination '$escapedTarget' -Recurse -Force
+      \$copied = \$true
       break
     } catch {
       Start-Sleep -Milliseconds 700
     }
   }
+
+  if (-not \$copied) {
+    throw 'Failed to copy update files to target directory.'
+  }
+
+  \$started = \$false
+  for (\$r = 0; \$r -lt 15; \$r++) {
+    try {
+      Start-Process -FilePath '$escapedExe' -WorkingDirectory '$escapedTarget'
+      \$started = \$true
+      break
+    } catch {
+      Start-Sleep -Milliseconds 700
+    }
+  }
+
+  if (-not \$started) {
+    try {
+      Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start "" "$escapedExe"' -WorkingDirectory '$escapedTarget'
+      \$started = \$true
+    } catch {
+      # fallback failed
+    }
+  }
+
+  if (-not \$started) {
+    Add-Content -Path '$escapedTarget\\waddonsync_updater_error.log' -Value 'Failed to relaunch app after update.'
+  }
 } catch {
   Write-Error \$_
+  Add-Content -Path '$escapedTarget\\waddonsync_updater_error.log' -Value \$_
 }
 ''';
 
