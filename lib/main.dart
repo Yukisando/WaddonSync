@@ -132,7 +132,8 @@ class _HomePageState extends State<HomePage> {
   bool applyConfig = false; // default off when applying
   bool applyBindings = true;
   bool applyInterface = true;
-  bool applyInterfaceAddonsOnly = true; // default on — only apply AddOns subfolder
+  bool applyInterfaceAddonsOnly =
+      true; // default on — only apply AddOns subfolder
   bool cleanApply = true; // Clean mode: delete before applying
 
   // Google Drive service
@@ -202,7 +203,8 @@ class _HomePageState extends State<HomePage> {
     return File(p.join(appFolder.path, name));
   }
 
-  Future<File> _getUpdateStateFile() async => _getLocalFile('update_state.json');
+  Future<File> _getUpdateStateFile() async =>
+      _getLocalFile('update_state.json');
 
   Future<Map<String, dynamic>> _readUpdateState() async {
     try {
@@ -232,13 +234,16 @@ class _HomePageState extends State<HomePage> {
     if (pendingTag == null || pendingTag.isEmpty) return;
 
     final packageInfo = await PackageInfo.fromPlatform();
-    final currentSemver = _extractSemver(packageInfo.version);
-    final pendingSemver = _extractSemver(pendingTag);
+    final applied = _isPendingUpdateApplied(
+      packageVersion: packageInfo.version,
+      packageBuild: packageInfo.buildNumber,
+      pendingTag: pendingTag,
+    );
 
-    if (currentSemver == null || pendingSemver == null || currentSemver != pendingSemver) {
+    if (!applied) {
       await _appendLog(
         'Update pending marker ignored because running version '
-        '${packageInfo.version} does not match pending tag $pendingTag',
+        '${packageInfo.version}+${packageInfo.buildNumber} does not match pending tag $pendingTag',
       );
       state.remove('pendingTag');
       state.remove('pendingFromVersion');
@@ -248,7 +253,9 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Previous update did not complete. App stayed on current version.'),
+          content: Text(
+            'Previous update did not complete. App stayed on current version.',
+          ),
         ),
       );
       return;
@@ -313,10 +320,41 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  String? _extractSemver(String input) {
-    final m = RegExp(r'v?(\d+\.\d+\.\d+)').firstMatch(input);
+  bool _isPendingUpdateApplied({
+    required String packageVersion,
+    required String packageBuild,
+    required String pendingTag,
+  }) {
+    final currentSemver = _parseSemverParts(packageVersion);
+    final pendingSemver = _parseSemverParts(pendingTag);
+    if (currentSemver == null || pendingSemver == null) return false;
+
+    // First, support strict semver tags (for example, app 1.2.3 and tag v1.2.3).
+    final exactSemverMatch =
+        currentSemver[0] == pendingSemver[0] &&
+        currentSemver[1] == pendingSemver[1] &&
+        currentSemver[2] == pendingSemver[2];
+    if (exactSemverMatch) return true;
+
+    // Also support release tags that encode build number as the 3rd segment
+    // (for example, tag v1.0.14 for app 1.0.0+14).
+    final currentBuild = int.tryParse(packageBuild);
+    if (currentBuild == null) return false;
+
+    return currentSemver[0] == pendingSemver[0] &&
+        currentSemver[1] == pendingSemver[1] &&
+        currentSemver[2] == 0 &&
+        currentBuild == pendingSemver[2];
+  }
+
+  List<int>? _parseSemverParts(String input) {
+    final m = RegExp(r'v?(\d+)\.(\d+)\.(\d+)').firstMatch(input);
     if (m == null) return null;
-    return m.group(1);
+    return [
+      int.parse(m.group(1)!),
+      int.parse(m.group(2)!),
+      int.parse(m.group(3)!),
+    ];
   }
 
   // Very simple Windows auto-detect: check common Program Files locations
@@ -393,7 +431,8 @@ class _HomePageState extends State<HomePage> {
         includeConfig = (m['includeConfig'] as bool?) ?? includeConfig;
         includeBindings = (m['includeBindings'] as bool?) ?? includeBindings;
         includeInterface = (m['includeInterface'] as bool?) ?? includeInterface;
-        interfaceAddonsOnly = (m['interfaceAddonsOnly'] as bool?) ?? interfaceAddonsOnly;
+        interfaceAddonsOnly =
+            (m['interfaceAddonsOnly'] as bool?) ?? interfaceAddonsOnly;
         excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
         wowRootPath = (m['wowRootPath'] as String?) ?? wowRootPath;
       });
@@ -503,7 +542,9 @@ class _HomePageState extends State<HomePage> {
   Future<void> _logAppVersionOnStartup() async {
     try {
       final info = await PackageInfo.fromPlatform();
-      await _appendLog('App launch version: ${info.version}+${info.buildNumber}');
+      await _appendLog(
+        'App launch version: ${info.version}+${info.buildNumber}',
+      );
     } catch (e) {
       await _appendLog('Failed to read app version at launch: $e');
     }
@@ -772,7 +813,8 @@ class _HomePageState extends State<HomePage> {
           if (isHiddenOrDotDir(rel)) continue;
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
           // AddOns-only filter: skip files not under AddOns/
-          if (interfaceAddonsOnly && (parts.isEmpty || parts.first != 'addons')) {
+          if (interfaceAddonsOnly &&
+              (parts.isEmpty || parts.first != 'addons')) {
             continue;
           }
           if (excludeCaches &&
@@ -1776,7 +1818,8 @@ class _HomePageState extends State<HomePage> {
                         bool tempApplyConfig = applyConfig;
                         bool tempApplyBindings = applyBindings;
                         bool tempApplyInterface = applyInterface;
-                        bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
+                        bool tempApplyInterfaceAddonsOnly =
+                            applyInterfaceAddonsOnly;
                         bool tempCleanApply = cleanApply;
                         final apply = await showDialog<bool>(
                           context: context,
@@ -1833,7 +1876,9 @@ class _HomePageState extends State<HomePage> {
                                       ),
                                     ),
                                     Padding(
-                                      padding: const EdgeInsets.only(left: 24.0),
+                                      padding: const EdgeInsets.only(
+                                        left: 24.0,
+                                      ),
                                       child: CheckboxListTile(
                                         title: const Text('AddOns only'),
                                         subtitle: const Text(
@@ -1842,8 +1887,10 @@ class _HomePageState extends State<HomePage> {
                                         value: tempApplyInterfaceAddonsOnly,
                                         onChanged: tempApplyInterface
                                             ? (v) => setState3(
-                                                  () => tempApplyInterfaceAddonsOnly = v ?? false,
-                                                )
+                                                () =>
+                                                    tempApplyInterfaceAddonsOnly =
+                                                        v ?? false,
+                                              )
                                             : null,
                                       ),
                                     ),
@@ -1873,7 +1920,8 @@ class _HomePageState extends State<HomePage> {
                                       applyConfig = tempApplyConfig;
                                       applyBindings = tempApplyBindings;
                                       applyInterface = tempApplyInterface;
-                                      applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
+                                      applyInterfaceAddonsOnly =
+                                          tempApplyInterfaceAddonsOnly;
                                       cleanApply = tempCleanApply;
                                     });
                                     Navigator.of(ctx).pop(true);
@@ -1911,7 +1959,8 @@ class _HomePageState extends State<HomePage> {
                             applyConfigFilter: applyConfig,
                             applyBindingsFilter: applyBindings,
                             applyInterfaceFilter: applyInterface,
-                            applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnly,
+                            applyInterfaceAddonsOnlyFilter:
+                                applyInterfaceAddonsOnly,
                             cleanMode: cleanApply,
                           );
 
@@ -1986,7 +2035,8 @@ class _HomePageState extends State<HomePage> {
                         bool tempApplyConfig = applyConfig;
                         bool tempApplyBindings = applyBindings;
                         bool tempApplyInterface = applyInterface;
-                        bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
+                        bool tempApplyInterfaceAddonsOnly =
+                            applyInterfaceAddonsOnly;
                         bool tempCleanApply = cleanApply;
                         final apply = await showDialog<bool>(
                           context: context,
@@ -2043,7 +2093,9 @@ class _HomePageState extends State<HomePage> {
                                       ),
                                     ),
                                     Padding(
-                                      padding: const EdgeInsets.only(left: 24.0),
+                                      padding: const EdgeInsets.only(
+                                        left: 24.0,
+                                      ),
                                       child: CheckboxListTile(
                                         title: const Text('AddOns only'),
                                         subtitle: const Text(
@@ -2052,8 +2104,10 @@ class _HomePageState extends State<HomePage> {
                                         value: tempApplyInterfaceAddonsOnly,
                                         onChanged: tempApplyInterface
                                             ? (v) => setState3(
-                                                  () => tempApplyInterfaceAddonsOnly = v ?? false,
-                                                )
+                                                () =>
+                                                    tempApplyInterfaceAddonsOnly =
+                                                        v ?? false,
+                                              )
                                             : null,
                                       ),
                                     ),
@@ -2083,7 +2137,8 @@ class _HomePageState extends State<HomePage> {
                                       applyConfig = tempApplyConfig;
                                       applyBindings = tempApplyBindings;
                                       applyInterface = tempApplyInterface;
-                                      applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
+                                      applyInterfaceAddonsOnly =
+                                          tempApplyInterfaceAddonsOnly;
                                       cleanApply = tempCleanApply;
                                     });
                                     Navigator.of(ctx).pop(true);
@@ -2121,7 +2176,8 @@ class _HomePageState extends State<HomePage> {
                             applyConfigFilter: applyConfig,
                             applyBindingsFilter: applyBindings,
                             applyInterfaceFilter: applyInterface,
-                            applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnly,
+                            applyInterfaceAddonsOnlyFilter:
+                                applyInterfaceAddonsOnly,
                             cleanMode: cleanApply,
                           );
 
@@ -2271,9 +2327,17 @@ class _HomePageState extends State<HomePage> {
 
       final appExePath = Platform.resolvedExecutable;
       final appDir = Directory(p.dirname(appExePath));
+      final payloadDir = await _resolveUpdatePayloadDirectory(
+        stageDir: stageDir,
+        appExePath: appExePath,
+      );
+      if (payloadDir == null) {
+        throw Exception('Update payload is missing ${p.basename(appExePath)}');
+      }
+
       _setUpdateProgress('Preparing installer...', progress: 0.94);
       final scriptPath = await _createUpdaterScript(
-        sourceDir: stageDir.path,
+        sourceDir: payloadDir.path,
         targetDir: appDir.path,
         appExePath: appExePath,
       );
@@ -2292,7 +2356,9 @@ class _HomePageState extends State<HomePage> {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Installing update now. App will restart automatically.'),
+          content: Text(
+            'Installing update now. App will restart automatically.',
+          ),
         ),
       );
 
@@ -2302,9 +2368,9 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       await _appendLog('One-click update failed: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Update failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Update failed: $e')));
     } finally {
       if (mounted) {
         setState(() {
@@ -2378,9 +2444,9 @@ class _HomePageState extends State<HomePage> {
     final client = http.Client();
     try {
       final request = http.Request('GET', Uri.parse(url));
-      final response = await client.send(request).timeout(
-        const Duration(minutes: 3),
-      );
+      final response = await client
+          .send(request)
+          .timeout(const Duration(minutes: 3));
       if (response.statusCode != 200) {
         throw Exception('Download failed with HTTP ${response.statusCode}');
       }
@@ -2431,6 +2497,40 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<Directory?> _resolveUpdatePayloadDirectory({
+    required Directory stageDir,
+    required String appExePath,
+  }) async {
+    final exeName = p.basename(appExePath).toLowerCase();
+
+    final rootExe = File(p.join(stageDir.path, exeName));
+    if (await rootExe.exists()) return stageDir;
+
+    final immediateCandidates = <Directory>[];
+    await for (final entity in stageDir.list(
+      recursive: false,
+      followLinks: false,
+    )) {
+      if (entity is! Directory) continue;
+      final candidateExe = File(p.join(entity.path, exeName));
+      if (await candidateExe.exists()) {
+        immediateCandidates.add(entity);
+      }
+    }
+    if (immediateCandidates.isNotEmpty) return immediateCandidates.first;
+
+    await for (final entity in stageDir.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File) continue;
+      if (p.basename(entity.path).toLowerCase() != exeName) continue;
+      return entity.parent;
+    }
+
+    return null;
+  }
+
   Future<String> _createUpdaterScript({
     required String sourceDir,
     required String targetDir,
@@ -2445,7 +2545,8 @@ class _HomePageState extends State<HomePage> {
     final escapedExe = appExePath.replaceAll("'", "''");
     final escapedProcessName = processName.replaceAll("'", "''");
 
-    final script = '''
+    final script =
+        '''
 
 Start-Sleep -Seconds 2
 
@@ -2669,8 +2770,8 @@ try {
                       value: tempApplyInterfaceAddonsOnly,
                       onChanged: tempApplyInterface
                           ? (v) => setState2(
-                                () => tempApplyInterfaceAddonsOnly = v ?? false,
-                              )
+                              () => tempApplyInterfaceAddonsOnly = v ?? false,
+                            )
                           : null,
                     ),
                   ),
@@ -2974,7 +3075,10 @@ try {
         } else {
           await _appendLog('Applying Interface...');
           try {
-            await _copyDirectoryContents(ifaceSource, Directory(interfacePath!));
+            await _copyDirectoryContents(
+              ifaceSource,
+              Directory(interfacePath!),
+            );
           } catch (e, st) {
             await _appendLog('Failed copying Interface: $e\n$st');
             return 'Failed to copy Interface files: $e';
@@ -3221,9 +3325,9 @@ try {
                       value: interfaceAddonsOnly,
                       onChanged: includeInterface
                           ? (v) => setState(() {
-                                interfaceAddonsOnly = v ?? false;
-                                _saveSettings(showSnack: false);
-                              })
+                              interfaceAddonsOnly = v ?? false;
+                              _saveSettings(showSnack: false);
+                            })
                           : null,
                     ),
                   ),
@@ -3321,7 +3425,9 @@ try {
                                   : _updateProgressLabel,
                             ),
                             const SizedBox(height: 8),
-                            LinearProgressIndicator(value: _updateProgressValue),
+                            LinearProgressIndicator(
+                              value: _updateProgressValue,
+                            ),
                           ],
                         ),
                       ),
