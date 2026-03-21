@@ -180,6 +180,51 @@ jobs:
           
           echo "PORTABLE_ASSET_NAME=$releaseName.zip" >> $env:GITHUB_OUTPUT
         id: portable
+
+      - name: Generate checksums and winget metadata
+        id: artifacts_meta
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $tag = "v$version"
+          $installerName = "${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}"
+          $portableName = "${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}"
+
+          if (-not (Test-Path $installerName)) {
+            throw "Installer asset missing for checksum: $installerName"
+          }
+          if (-not (Test-Path $portableName)) {
+            throw "Portable asset missing for checksum: $portableName"
+          }
+
+          $installerHash = (Get-FileHash $installerName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $portableHash = (Get-FileHash $portableName -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $checksumsFile = "checksums-$version.txt"
+          @(
+            "SHA256 checksums for WaddonSync v$version",
+            "",
+            "$installerHash  $installerName",
+            "$portableHash  $portableName"
+          ) | Out-File -FilePath $checksumsFile -Encoding utf8
+
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$installerName"
+          $wingetMetaFile = "winget-metadata-$version.json"
+
+          $wingetObject = [ordered]@{
+            PackageIdentifier = "Yukisando.WaddonSync"
+            PackageVersion = $version
+            InstallerType = "inno"
+            InstallerUrl = $installerUrl
+            InstallerSha256 = $installerHash
+            Scope = "machine"
+            ReleaseTag = $tag
+          }
+          $wingetObject | ConvertTo-Json | Out-File -FilePath $wingetMetaFile -Encoding utf8
+
+          echo "CHECKSUMS_ASSET_NAME=$checksumsFile" >> $env:GITHUB_OUTPUT
+          echo "WINGET_META_ASSET_NAME=$wingetMetaFile" >> $env:GITHUB_OUTPUT
+          echo "INSTALLER_SHA256=$installerHash" >> $env:GITHUB_OUTPUT
         
       - name: Generate release notes
         id: release_notes
@@ -210,6 +255,14 @@ jobs:
 
           ### Signing
           - Installer/app binaries are Authenticode-signed when code-signing secrets are configured in the repository.
+
+          ### Integrity
+          - SHA256 checksums are published in ``${{ steps.artifacts_meta.outputs.CHECKSUMS_ASSET_NAME }}``.
+
+          ### Winget
+          - Use ``${{ steps.artifacts_meta.outputs.WINGET_META_ASSET_NAME }}`` for winget submission values.
+          - Package identifier: ``Yukisando.WaddonSync``
+          - Installer SHA256: ``${{ steps.artifacts_meta.outputs.INSTALLER_SHA256 }}``
           
           ---
           *Automated build from commit ${{ github.sha }}*
@@ -227,6 +280,8 @@ jobs:
           files: |
             ${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}
             ${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}
+            ${{ steps.artifacts_meta.outputs.CHECKSUMS_ASSET_NAME }}
+            ${{ steps.artifacts_meta.outputs.WINGET_META_ASSET_NAME }}
           draft: false
           prerelease: false
         env:

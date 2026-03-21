@@ -46,6 +46,38 @@ Notes:
 - If signing secrets are not configured, releases still build and publish (unsigned).
 - For best SmartScreen reputation, use a trusted commercial code-signing certificate (OV or EV).
 
+Microsoft Defender false-positive / PUA submission (form fields):
+
+- If you are submitting your installer as a false positive, select:
+	- `Incorrectly detected as PUA (potentially unwanted application)`
+- `Detection name`:
+	- Open Windows Security -> Virus & threat protection -> Protection history
+	- Open the detection event for your installer and copy the exact detection name
+- `Definition version`:
+	- In PowerShell run: `Get-MpComputerStatus | Select-Object AntivirusSignatureVersion`
+- `Additional information` should include:
+	- Product: WaddonSync
+	- Source URL: your GitHub release page
+	- File name and SHA256 from release checksums file
+	- Statement that this is your own installer and expected behavior
+
+SHA256 checksums in releases:
+
+- Each release includes `checksums-<version>.txt`.
+- Verify downloaded files in PowerShell:
+	- `Get-FileHash .\WaddonSync-Installer-<version>.exe -Algorithm SHA256`
+	- Compare with value in checksums file.
+
+Winget submission/update:
+
+- Each release includes `winget-metadata-<version>.json` with:
+	- PackageIdentifier
+	- PackageVersion
+	- InstallerUrl
+	- InstallerSha256
+- Submit/update package in `microsoft/winget-pkgs` using those values.
+- Recommended PackageIdentifier: `Yukisando.WaddonSync`
+
 Future ideas (not implemented yet):
 
 - More cloud providers (OneDrive, Dropbox, Firebase Storage, etc.)
