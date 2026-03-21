@@ -31,8 +31,8 @@ void main() {
     },
     (error, stack) {
       // Print errors to console for diagnostics (visible if a console is attached).
-      print('Unhandled Zone error: $error');
-      print(stack);
+      debugPrint('Unhandled Zone error: $error');
+      debugPrint('$stack');
     },
   );
 }
@@ -179,7 +179,8 @@ class _HomePageState extends State<HomePage> {
     _driveService = GoogleDriveService(_appendLog);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeUpdateState();
+      unawaited(_logAppVersionOnStartup());
+      unawaited(_initializeUpdateState());
     });
   }
 
@@ -467,6 +468,15 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     } catch (e) {
       // best-effort logging only
+    }
+  }
+
+  Future<void> _logAppVersionOnStartup() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      await _appendLog('App launch version: ${info.version}+${info.buildNumber}');
+    } catch (e) {
+      await _appendLog('Failed to read app version at launch: $e');
     }
   }
 
@@ -1425,10 +1435,9 @@ class _HomePageState extends State<HomePage> {
                     final id = 'local:$path';
 
                     return ListTile(
-                      leading: Radio<String>(
-                        value: id,
-                        groupValue: selectedId ?? '',
-                        onChanged: (v) => setState2(() => selectedId = v),
+                      leading: Checkbox(
+                        value: selectedId == id,
+                        onChanged: (_) => setState2(() => selectedId = id),
                       ),
                       title: Text(name),
                       subtitle: Text(
@@ -1539,7 +1548,7 @@ class _HomePageState extends State<HomePage> {
                     child: ListView.separated(
                       shrinkWrap: true,
                       itemCount: onlineBackups.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      separatorBuilder: (_, index) => const Divider(height: 1),
                       itemBuilder: (ctx3, idx) {
                         final b = onlineBackups[idx];
                         final fid = b['fileId'] as String?;
@@ -1552,10 +1561,9 @@ class _HomePageState extends State<HomePage> {
                         final id = 'online:$fid';
 
                         return ListTile(
-                          leading: Radio<String>(
-                            value: id,
-                            groupValue: selectedId ?? '',
-                            onChanged: (v) => setState2(() => selectedId = v),
+                          leading: Checkbox(
+                            value: selectedId == id,
+                            onChanged: (_) => setState2(() => selectedId = id),
                           ),
                           title: Text(name),
                           subtitle: Text('$created • $sizeMB MB'),
