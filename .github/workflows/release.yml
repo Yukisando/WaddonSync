@@ -64,53 +64,80 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Prepare code signing certificate (optional)
+        id: codesign
+        shell: pwsh
+        env:
+          CODE_SIGN_CERT_PFX_BASE64: ${{ secrets.CODE_SIGN_CERT_PFX_BASE64 }}
+          CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
+          CODE_SIGN_TIMESTAMP_URL: ${{ secrets.CODE_SIGN_TIMESTAMP_URL }}
+        run: |
+          $hasPfx = -not [string]::IsNullOrWhiteSpace($env:CODE_SIGN_CERT_PFX_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:CODE_SIGN_CERT_PASSWORD)
+
+          if (-not $hasPfx -or -not $hasPassword) {
+            Write-Host "Code signing disabled: CODE_SIGN_CERT_PFX_BASE64/CODE_SIGN_CERT_PASSWORD not set."
+            echo "ENABLED=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          New-Item -ItemType Directory -Force -Path certs | Out-Null
+          $pfxPath = Join-Path (Get-Location) "certs\codesign.pfx"
+          [IO.File]::WriteAllBytes(
+            $pfxPath,
+            [Convert]::FromBase64String($env:CODE_SIGN_CERT_PFX_BASE64)
+          )
+
+          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:CODE_SIGN_TIMESTAMP_URL)) {
+            "http://timestamp.digicert.com"
+          } else {
+            $env:CODE_SIGN_TIMESTAMP_URL
+          }
+
+          echo "ENABLED=true" >> $env:GITHUB_OUTPUT
+          echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
+          echo "TIMESTAMP_URL=$timestampUrl" >> $env:GITHUB_OUTPUT
         
       - name: Build Windows executable
         run: flutter build windows --release --build-name ${{ steps.version.outputs.VERSION }} --build-number ${{ steps.version.outputs.BUILD_NUMBER }}
 
-      - name: Build MSIX and App Installer assets
-        id: installer_assets
+      - name: Sign app executable (optional)
+        if: steps.codesign.outputs.ENABLED == 'true'
+        shell: pwsh
+        env:
+          CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          & $signtool sign /fd SHA256 /f "${{ steps.codesign.outputs.PFX_PATH }}" /p "$env:CODE_SIGN_CERT_PASSWORD" /tr "${{ steps.codesign.outputs.TIMESTAMP_URL }}" /td SHA256 "build\windows\x64\runner\Release\waddonsync.exe"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y
+
+      - name: Build setup installer
+        id: installer
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
-          $build = "${{ steps.version.outputs.BUILD_NUMBER }}"
-          $tag = "v$version"
-          $msixVersion = "$version.$build"
-          $publishDir = Join-Path (Get-Location) "build\msix_publish"
+          $installerName = "WaddonSync-Installer-$version"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" "/DMyOutputBaseFilename=$installerName" "installer\WaddonSync.iss"
+          echo "INSTALLER_ASSET_NAME=$installerName.exe" >> $env:GITHUB_OUTPUT
 
-          New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
-          dart run msix:publish --build-windows false --install-certificate false --version $msixVersion --publish-folder-path $publishDir
-
-          $generatedMsix = Get-ChildItem -Path (Join-Path $publishDir "versions") -Filter *.msix -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $generatedMsix) {
-            throw "MSIX package not found in publish output."
-          }
-          $generatedAppInstaller = Get-ChildItem -Path $publishDir -Filter *.appinstaller -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $generatedAppInstaller) {
-            throw "App Installer file not found in publish output."
-          }
-
-          $msixAssetName = "WaddonSync-$version.msix"
-          $appInstallerAssetName = "WaddonSync-$version.appinstaller"
-
-          Copy-Item $generatedMsix.FullName -Destination $msixAssetName -Force
-
-          $msixUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$msixAssetName"
-          $appInstallerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$appInstallerAssetName"
-
-          $appInstallerContent = Get-Content $generatedAppInstaller.FullName -Raw
-          $appInstallerContent = $appInstallerContent -replace '(?s)(<AppInstaller\b[^>]*\bUri=")[^"]*(")', "`$1$appInstallerUrl`$2"
-          $appInstallerContent = $appInstallerContent -replace '(?s)(<MainPackage\b[^>]*\bUri=")[^"]*(")', "`$1$msixUrl`$2"
-          $appInstallerContent | Out-File -FilePath $appInstallerAssetName -Encoding utf8
-
-          echo "MSIX_ASSET_NAME=$msixAssetName" >> $env:GITHUB_OUTPUT
-          echo "APPINSTALLER_ASSET_NAME=$appInstallerAssetName" >> $env:GITHUB_OUTPUT
+      - name: Sign installer executable (optional)
+        if: steps.codesign.outputs.ENABLED == 'true'
+        shell: pwsh
+        env:
+          CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
+        run: |
+          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          & $signtool sign /fd SHA256 /f "${{ steps.codesign.outputs.PFX_PATH }}" /p "$env:CODE_SIGN_CERT_PASSWORD" /tr "${{ steps.codesign.outputs.TIMESTAMP_URL }}" /td SHA256 "${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}"
         
-      - name: Create release archive
+      - name: Create portable archive
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
-          $releaseName = "WaddonSync-Windows-$version"
+          $releaseName = "WaddonSync-Portable-$version"
           
           # Create a clean directory for the release
           New-Item -ItemType Directory -Force -Path release
@@ -118,11 +145,11 @@ jobs:
           # Copy the built application
           Copy-Item -Path "build\windows\x64\runner\Release\*" -Destination "release\" -Recurse
           
-          # Create a zip file
+          # Create a portable zip file
           Compress-Archive -Path "release\*" -DestinationPath "$releaseName.zip"
           
-          echo "RELEASE_NAME=$releaseName" >> $env:GITHUB_OUTPUT
-        id: archive
+          echo "PORTABLE_ASSET_NAME=$releaseName.zip" >> $env:GITHUB_OUTPUT
+        id: portable
         
       - name: Generate release notes
         id: release_notes
@@ -136,9 +163,11 @@ jobs:
           **Build Date:** $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
           
           ### Installation
-          1. Preferred: download and open ``${{ steps.installer_assets.outputs.APPINSTALLER_ASSET_NAME }}``
-          2. Direct package option: install ``${{ steps.installer_assets.outputs.MSIX_ASSET_NAME }}``
-          3. Alternative portable mode: download the zip file, extract it, and run ``waddonsync.exe``
+           1. Installer option (recommended): download and run ``${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}``
+             - Standard setup wizard
+             - Lets users choose install folder
+             - Adds native uninstall entry in Windows Installed Apps
+           2. Portable option: download ``${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}``, extract, and run ``waddonsync.exe``
           
           ### Features
           - Backup and sync World of Warcraft addons and settings
@@ -148,6 +177,9 @@ jobs:
           
           ### Requirements
           - Windows 10 or later
+
+          ### Signing
+          - Installer/app binaries are Authenticode-signed when code-signing secrets are configured in the repository.
           
           ---
           *Automated build from commit ${{ github.sha }}*
@@ -163,9 +195,8 @@ jobs:
           name: WaddonSync v${{ steps.version.outputs.VERSION }}
           body_path: release_notes.md
           files: |
-            ${{ steps.archive.outputs.RELEASE_NAME }}.zip
-            ${{ steps.installer_assets.outputs.MSIX_ASSET_NAME }}
-            ${{ steps.installer_assets.outputs.APPINSTALLER_ASSET_NAME }}
+            ${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}
+            ${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}
           draft: false
           prerelease: false
         env:

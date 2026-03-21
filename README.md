@@ -17,22 +17,34 @@ Platform:
 
 Windows install and uninstall:
 
-- For native Windows "Installed apps" integration and uninstall from the standard Windows UI, use the MSIX package.
-- MSIX installs appear in Windows app lists and can be removed with normal uninstall actions.
-- The app update button now prefers opening App Installer/MSIX assets from GitHub releases.
-- Releases now include both a `.msix` package and a `.appinstaller` file.
+- Releases provide two options only:
+	- `WaddonSync-Installer-<version>.exe` (recommended)
+	- `WaddonSync-Portable-<version>.zip`
+- Installer EXE uses a standard setup wizard:
+	- lets users choose install folder
+	- registers native uninstall entry in Windows Installed Apps
+- Portable ZIP is no-install mode and runs directly after extraction.
 
-Build MSIX locally:
-
-1. Run `flutter pub get`
-2. Run `dart run msix:create`
-3. Install the generated `.msix` from the build output
-
-Build App Installer publish files locally:
+Build installer locally (Windows):
 
 1. Run `flutter pub get`
-2. Run `dart run msix:publish --publish-folder-path build\\msix_publish`
-3. Use the generated `.appinstaller` and `versions\\*.msix` outputs
+2. Run `flutter build windows --release`
+3. Install Inno Setup 6
+4. Run `"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\WaddonSync.iss`
+
+SmartScreen and code signing (recommended):
+
+- Unsigned installers often trigger stronger SmartScreen warnings.
+- To improve trust and reduce warnings, configure Authenticode signing in CI.
+- The release workflow supports optional signing when these repository secrets are set:
+	- `CODE_SIGN_CERT_PFX_BASE64`: Base64 of your code-signing `.pfx`
+	- `CODE_SIGN_CERT_PASSWORD`: Password for that `.pfx`
+	- `CODE_SIGN_TIMESTAMP_URL` (optional): RFC3161 timestamp URL; default is `http://timestamp.digicert.com`
+
+Notes:
+
+- If signing secrets are not configured, releases still build and publish (unsigned).
+- For best SmartScreen reputation, use a trusted commercial code-signing certificate (OV or EV).
 
 Future ideas (not implemented yet):
 

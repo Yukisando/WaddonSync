@@ -62,7 +62,6 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  msix: ^3.16.8
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -114,19 +113,3 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
-
-msix_config:
-  display_name: WaddonSync
-  publisher_display_name: WaddonSync
-  identity_name: com.waddonsync.app
-  msix_version: 1.0.0.0
-  logo_path: assets/icon.png
-  install_certificate: false
-  capabilities: internetClient
-  app_installer:
-    publish_folder_path: build\\msix_publish
-    hours_between_update_checks: 0
-    automatic_background_task: true
-    update_blocks_activation: false
-    show_prompt: true
-    force_update_from_any_version: false

@@ -97,7 +97,8 @@ class AppUpdateService {
     final latestBuildNumber = _parseBuildNumber(latest.tagName) ?? 0;
 
     final compare = _compareSemver(currentSemver, latestSemver);
-    final hasUpdate = compare < 0 || (compare == 0 && latestBuildNumber > currentBuildNumber);
+    final hasUpdate =
+        compare < 0 || (compare == 0 && latestBuildNumber > currentBuildNumber);
 
     return AppUpdateCheckResult(
       hasUpdate: hasUpdate,
@@ -164,9 +165,11 @@ class AppUpdateService {
     zipAssets.sort((a, b) {
       final aName = a.name.toLowerCase();
       final bName = b.name.toLowerCase();
-      final aScore = (aName.contains('windows') ? 1 : 0) +
+      final aScore =
+          (aName.contains('windows') ? 1 : 0) +
           (aName.contains('waddonsync') ? 1 : 0);
-      final bScore = (bName.contains('windows') ? 1 : 0) +
+      final bScore =
+          (bName.contains('windows') ? 1 : 0) +
           (bName.contains('waddonsync') ? 1 : 0);
       return bScore.compareTo(aScore);
     });
@@ -174,29 +177,29 @@ class AppUpdateService {
     return zipAssets.first;
   }
 
-  AppReleaseAsset? getPreferredWindowsInstallerAsset(AppReleaseInfo release) {
+  AppReleaseAsset? getPreferredWindowsInstallerExeAsset(
+    AppReleaseInfo release,
+  ) {
     final installerAssets = release.assets.where((asset) {
       final name = asset.name.toLowerCase();
-      return name.endsWith('.appinstaller') ||
-          name.endsWith('.msix') ||
-          name.endsWith('.msixbundle');
+      final type = asset.contentType.toLowerCase();
+      final looksExecutable =
+          type.contains('octet-stream') || type.contains('x-msdownload');
+      return name.endsWith('.exe') && looksExecutable;
     }).toList();
 
     if (installerAssets.isEmpty) return null;
 
-    // Prefer App Installer feeds first, then plain MSIX packages.
     installerAssets.sort((a, b) {
       int score(String n) {
         var s = 0;
-        if (n.endsWith('.appinstaller')) s += 4;
-        if (n.contains('windows')) s += 2;
+        if (n.contains('installer')) s += 4;
+        if (n.contains('setup')) s += 3;
         if (n.contains('waddonsync')) s += 1;
         return s;
       }
 
-      final aScore = score(a.name.toLowerCase());
-      final bScore = score(b.name.toLowerCase());
-      return bScore.compareTo(aScore);
+      return score(b.name.toLowerCase()).compareTo(score(a.name.toLowerCase()));
     });
 
     return installerAssets.first;

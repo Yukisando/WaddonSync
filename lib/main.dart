@@ -2321,11 +2321,10 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final installerAsset = _updateService.getPreferredWindowsInstallerAsset(
-        release,
-      );
+      final installerAsset = _updateService
+          .getPreferredWindowsInstallerExeAsset(release);
       if (installerAsset != null && installerAsset.downloadUrl.isNotEmpty) {
-        final proceed = await _confirmInstallerUpdate(installerAsset.name);
+        final proceed = await _confirmInstallerExeUpdate(installerAsset.name);
         if (!proceed) return;
         if (!mounted) return;
 
@@ -2334,7 +2333,10 @@ class _HomePageState extends State<HomePage> {
         );
 
         _setUpdateProgress('Opening installer...', progress: null);
-        final opened = await _openInstallerUpdate(installerAsset.downloadUrl);
+        final opened = await launchUrl(
+          Uri.parse(installerAsset.downloadUrl),
+          mode: LaunchMode.externalApplication,
+        );
         if (!opened) {
           throw Exception('Could not open installer URL.');
         }
@@ -2343,7 +2345,7 @@ class _HomePageState extends State<HomePage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Installer opened for ${result.latestVersion}. Follow the Windows install/update prompt.',
+              'Installer downloaded/opened for ${result.latestVersion}. Run it and choose installation folder in the setup wizard.',
             ),
             duration: const Duration(seconds: 8),
           ),
@@ -2360,7 +2362,7 @@ class _HomePageState extends State<HomePage> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'No installer or zip update asset found in the latest release.',
+              'No installer executable or zip update asset found in the latest release.',
             ),
           ),
         );
@@ -2534,7 +2536,7 @@ class _HomePageState extends State<HomePage> {
     return confirmed == true;
   }
 
-  Future<bool> _confirmInstallerUpdate(String installerName) async {
+  Future<bool> _confirmInstallerExeUpdate(String installerName) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2544,13 +2546,13 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'This app now prefers MSIX/App Installer based updates for native Windows install/uninstall support.',
+              'This app uses a standard Windows setup installer for updates.',
             ),
             const SizedBox(height: 10),
             Text('Installer asset: $installerName'),
             const SizedBox(height: 10),
             const Text(
-              'Windows may show a prompt. Confirm it to update the installed app.',
+              'Run the setup wizard and choose the installation path.',
             ),
           ],
         ),
@@ -2568,24 +2570,6 @@ class _HomePageState extends State<HomePage> {
     );
 
     return confirmed == true;
-  }
-
-  Future<bool> _openInstallerUpdate(String downloadUrl) async {
-    final uri = Uri.parse(downloadUrl);
-    final path = uri.path.toLowerCase();
-
-    if (path.endsWith('.appinstaller')) {
-      final schemeUri = Uri.parse(
-        'ms-appinstaller:?source=${Uri.encodeComponent(downloadUrl)}',
-      );
-      final openedViaScheme = await launchUrl(
-        schemeUri,
-        mode: LaunchMode.externalApplication,
-      );
-      if (openedViaScheme) return true;
-    }
-
-    return launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   Future<void> _downloadUpdateZip(
@@ -3613,7 +3597,7 @@ try {
 
                   const SizedBox(height: 8),
                   const Text(
-                    'Updates now prefer Windows installer packages (MSIX/App Installer) for native install/uninstall behavior.',
+                    'Updates now prefer a standard setup installer. Portable ZIP remains available for no-install use.',
                     style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
                   ),
 
