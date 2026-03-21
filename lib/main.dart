@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // Services
 import 'services/google_drive_service.dart';
@@ -2310,10 +2311,6 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final proceed = await _confirmUpdateWarning();
-      if (!proceed) return;
-      if (!mounted) return;
-
       final release = result.release;
       if (release == null) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2324,11 +2321,47 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
+      final installerAsset = _updateService.getPreferredWindowsInstallerAsset(
+        release,
+      );
+      if (installerAsset != null && installerAsset.downloadUrl.isNotEmpty) {
+        final proceed = await _confirmInstallerUpdate(installerAsset.name);
+        if (!proceed) return;
+        if (!mounted) return;
+
+        await _appendLog(
+          'Opening installer update asset for ${result.latestVersion}: ${installerAsset.name}',
+        );
+
+        _setUpdateProgress('Opening installer...', progress: null);
+        final opened = await _openInstallerUpdate(installerAsset.downloadUrl);
+        if (!opened) {
+          throw Exception('Could not open installer URL.');
+        }
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Installer opened for ${result.latestVersion}. Follow the Windows install/update prompt.',
+            ),
+            duration: const Duration(seconds: 8),
+          ),
+        );
+        return;
+      }
+
+      final proceed = await _confirmUpdateWarning();
+      if (!proceed) return;
+      if (!mounted) return;
+
       final asset = _updateService.getPreferredWindowsZipAsset(release);
       if (asset == null || asset.downloadUrl.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No Windows zip asset found in the latest release.'),
+            content: Text(
+              'No installer or zip update asset found in the latest release.',
+            ),
           ),
         );
         return;
@@ -2499,6 +2532,60 @@ class _HomePageState extends State<HomePage> {
     );
 
     return confirmed == true;
+  }
+
+  Future<bool> _confirmInstallerUpdate(String installerName) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Open installer update'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'This app now prefers MSIX/App Installer based updates for native Windows install/uninstall support.',
+            ),
+            const SizedBox(height: 10),
+            Text('Installer asset: $installerName'),
+            const SizedBox(height: 10),
+            const Text(
+              'Windows may show a prompt. Confirm it to update the installed app.',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Open Installer'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed == true;
+  }
+
+  Future<bool> _openInstallerUpdate(String downloadUrl) async {
+    final uri = Uri.parse(downloadUrl);
+    final path = uri.path.toLowerCase();
+
+    if (path.endsWith('.appinstaller')) {
+      final schemeUri = Uri.parse(
+        'ms-appinstaller:?source=${Uri.encodeComponent(downloadUrl)}',
+      );
+      final openedViaScheme = await launchUrl(
+        schemeUri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (openedViaScheme) return true;
+    }
+
+    return launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   Future<void> _downloadUpdateZip(
@@ -3526,7 +3613,7 @@ try {
 
                   const SizedBox(height: 8),
                   const Text(
-                    'Warning: One-click update only works reliably in unprotected directories (not Program Files).',
+                    'Updates now prefer Windows installer packages (MSIX/App Installer) for native install/uninstall behavior.',
                     style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
                   ),
 

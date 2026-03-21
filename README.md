@@ -15,6 +15,25 @@ Platform:
 
 - Windows desktop (built with Flutter). Designed for Windows users who want a simple, reliable way to backup and restore addons and settings.
 
+Windows install and uninstall:
+
+- For native Windows "Installed apps" integration and uninstall from the standard Windows UI, use the MSIX package.
+- MSIX installs appear in Windows app lists and can be removed with normal uninstall actions.
+- The app update button now prefers opening App Installer/MSIX assets from GitHub releases.
+- Releases now include both a `.msix` package and a `.appinstaller` file.
+
+Build MSIX locally:
+
+1. Run `flutter pub get`
+2. Run `dart run msix:create`
+3. Install the generated `.msix` from the build output
+
+Build App Installer publish files locally:
+
+1. Run `flutter pub get`
+2. Run `dart run msix:publish --publish-folder-path build\\msix_publish`
+3. Use the generated `.appinstaller` and `versions\\*.msix` outputs
+
 Future ideas (not implemented yet):
 
 - More cloud providers (OneDrive, Dropbox, Firebase Storage, etc.)

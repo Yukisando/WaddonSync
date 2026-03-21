@@ -174,6 +174,34 @@ class AppUpdateService {
     return zipAssets.first;
   }
 
+  AppReleaseAsset? getPreferredWindowsInstallerAsset(AppReleaseInfo release) {
+    final installerAssets = release.assets.where((asset) {
+      final name = asset.name.toLowerCase();
+      return name.endsWith('.appinstaller') ||
+          name.endsWith('.msix') ||
+          name.endsWith('.msixbundle');
+    }).toList();
+
+    if (installerAssets.isEmpty) return null;
+
+    // Prefer App Installer feeds first, then plain MSIX packages.
+    installerAssets.sort((a, b) {
+      int score(String n) {
+        var s = 0;
+        if (n.endsWith('.appinstaller')) s += 4;
+        if (n.contains('windows')) s += 2;
+        if (n.contains('waddonsync')) s += 1;
+        return s;
+      }
+
+      final aScore = score(a.name.toLowerCase());
+      final bScore = score(b.name.toLowerCase());
+      return bScore.compareTo(aScore);
+    });
+
+    return installerAssets.first;
+  }
+
   String _displayVersion(String version, String build) {
     if (build.isEmpty) return version;
     return '$version+$build';
