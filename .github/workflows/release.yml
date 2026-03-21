@@ -121,7 +121,37 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
           $installerName = "WaddonSync-Installer-$version"
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" "/DMyOutputBaseFilename=$installerName" "installer\WaddonSync.iss"
+
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+          if ([string]::IsNullOrWhiteSpace($iscc)) {
+            $candidates = @(
+              "C:\ProgramData\chocolatey\bin\iscc.exe",
+              "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+              "C:\Program Files\Inno Setup 6\ISCC.exe"
+            )
+            foreach ($candidate in $candidates) {
+              if (Test-Path $candidate) {
+                $iscc = $candidate
+                break
+              }
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($iscc)) {
+            throw "ISCC.exe not found after installing Inno Setup."
+          }
+
+          if (-not (Test-Path "installer\WaddonSync.iss")) {
+            throw "Installer script not found: installer\\WaddonSync.iss"
+          }
+
+          Write-Host "Using ISCC: $iscc"
+          & $iscc "/DMyAppVersion=$version" "/DMyOutputBaseFilename=$installerName" "installer\WaddonSync.iss"
+
+          if (-not (Test-Path "$installerName.exe")) {
+            throw "Expected installer output not found: $installerName.exe"
+          }
+
           echo "INSTALLER_ASSET_NAME=$installerName.exe" >> $env:GITHUB_OUTPUT
 
       - name: Sign installer executable (optional)
