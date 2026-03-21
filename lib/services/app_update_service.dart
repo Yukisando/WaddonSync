@@ -58,6 +58,7 @@ class AppUpdateService {
   Future<AppUpdateCheckResult> checkForUpdates({
     required String currentVersion,
     required String currentBuild,
+    String? installedReleaseTag,
   }) async {
     final latest = await _fetchLatestRelease();
     if (latest == null) {
@@ -66,6 +67,17 @@ class AppUpdateService {
         currentVersion: _displayVersion(currentVersion, currentBuild),
         latestVersion: 'unknown',
         message: 'Could not fetch latest release from GitHub.',
+      );
+    }
+
+    if (installedReleaseTag != null &&
+        installedReleaseTag.isNotEmpty &&
+        installedReleaseTag == latest.tagName) {
+      return AppUpdateCheckResult(
+        hasUpdate: false,
+        currentVersion: _displayVersion(currentVersion, currentBuild),
+        latestVersion: latest.tagName,
+        release: latest,
       );
     }
 

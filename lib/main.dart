@@ -141,6 +141,7 @@ class _HomePageState extends State<HomePage> {
   bool _isCheckingForUpdates = false;
   String _updateProgressLabel = '';
   double? _updateProgressValue;
+  String? _installedReleaseTag;
 
   // Live log streaming
   final List<String> _liveLogs = [];
@@ -178,7 +179,7 @@ class _HomePageState extends State<HomePage> {
     _driveService = GoogleDriveService(_appendLog);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Post-frame callback for any startup UI work.
+      _initializeUpdateState();
     });
   }
 
@@ -198,6 +199,94 @@ class _HomePageState extends State<HomePage> {
     );
     if (!await appFolder.exists()) await appFolder.create(recursive: true);
     return File(p.join(appFolder.path, name));
+  }
+
+  Future<File> _getUpdateStateFile() async => _getLocalFile('update_state.json');
+
+  Future<Map<String, dynamic>> _readUpdateState() async {
+    try {
+      final f = await _getUpdateStateFile();
+      if (!await f.exists()) return <String, dynamic>{};
+      final raw = await f.readAsString();
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return decoded;
+      return <String, dynamic>{};
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
+  Future<void> _writeUpdateState(Map<String, dynamic> state) async {
+    final f = await _getUpdateStateFile();
+    await f.writeAsString(jsonEncode(state), flush: true);
+  }
+
+  Future<void> _initializeUpdateState() async {
+    final state = await _readUpdateState();
+    if (!mounted) return;
+
+    _installedReleaseTag = state['installedReleaseTag'] as String?;
+
+    final pendingTag = state['pendingTag'] as String?;
+    if (pendingTag == null || pendingTag.isEmpty) return;
+
+    final pendingFrom = state['pendingFromVersion'] as String? ?? 'unknown';
+    final pendingNotes = state['pendingNotes'] as String? ?? '';
+    final pendingName = state['pendingName'] as String? ?? pendingTag;
+
+    state['installedReleaseTag'] = pendingTag;
+    state.remove('pendingTag');
+    state.remove('pendingFromVersion');
+    state.remove('pendingNotes');
+    state.remove('pendingName');
+    await _writeUpdateState(state);
+    _installedReleaseTag = pendingTag;
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update successful'),
+        content: SizedBox(
+          width: 560,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Version changed: $pendingFrom -> $pendingTag'),
+              const SizedBox(height: 6),
+              Text('Installed release: $pendingTag'),
+              const SizedBox(height: 8),
+              Text(
+                pendingName,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Latest changes',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    pendingNotes.isEmpty
+                        ? 'No release notes provided.'
+                        : pendingNotes,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   // Very simple Windows auto-detect: check common Program Files locations
@@ -2035,10 +2124,6 @@ class _HomePageState extends State<HomePage> {
   Future<void> _performOneClickUpdate() async {
     if (_isCheckingForUpdates) return;
 
-    final proceed = await _confirmUpdateWarning();
-    if (!proceed) return;
-    if (!mounted) return;
-
     setState(() {
       _isCheckingForUpdates = true;
       _updateProgressLabel = 'Checking for updates...';
@@ -2049,6 +2134,7 @@ class _HomePageState extends State<HomePage> {
       final result = await _updateService.checkForUpdates(
         currentVersion: packageInfo.version,
         currentBuild: packageInfo.buildNumber,
+        installedReleaseTag: _installedReleaseTag,
       );
 
       if (!mounted) return;
@@ -2061,15 +2147,15 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (!result.hasUpdate) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'You are up to date (${result.currentVersion}).',
-            ),
-          ),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('No update available.')));
         return;
       }
+
+      final proceed = await _confirmUpdateWarning();
+      if (!proceed) return;
+      if (!mounted) return;
 
       final release = result.release;
       if (release == null) {
@@ -2093,6 +2179,14 @@ class _HomePageState extends State<HomePage> {
 
       await _appendLog('One-click update started to ${result.latestVersion}');
       _setUpdateProgress('Preparing download...', progress: 0.05);
+
+      final state = await _readUpdateState();
+      state['pendingTag'] = result.latestVersion;
+      state['pendingFromVersion'] = result.currentVersion;
+      state['pendingName'] = release.name;
+      state['pendingNotes'] = release.body;
+      await _writeUpdateState(state);
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -2331,7 +2425,14 @@ for (
 
 try {
   Copy-Item -Path '$escapedSource\\*' -Destination '$escapedTarget' -Recurse -Force
-  Start-Process -FilePath '$escapedExe'
+  for (\$r = 0; \$r -lt 10; \$r++) {
+    try {
+      Start-Process -FilePath '$escapedExe' -WorkingDirectory '$escapedTarget'
+      break
+    } catch {
+      Start-Sleep -Milliseconds 700
+    }
+  }
 } catch {
   Write-Error \$_
 }
