@@ -29,6 +29,14 @@ class GoogleDriveService {
     try {
       await log('Initializing Google Drive service...');
 
+      if (!GoogleOAuthService.isConfigured) {
+        await log(
+          'Google Drive is disabled for this build. OAuth credentials were '
+          'not provided via --dart-define.',
+        );
+        return false;
+      }
+
       // Check if we have stored credentials
       final hasCredentials = await _tokenStorage.hasCredentials();
 
@@ -389,6 +397,10 @@ class GoogleDriveService {
 
   /// Checks if user is currently authenticated
   Future<bool> isAuthenticated() async {
+    if (!GoogleOAuthService.isConfigured) {
+      return false;
+    }
+
     return await _tokenStorage.hasCredentials();
   }
 }

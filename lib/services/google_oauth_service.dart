@@ -4,23 +4,25 @@ import 'dart:convert';
 import 'package:googleapis_auth/auth_io.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
-import '../config/secrets.dart';
 
 /// Google OAuth 2.0 service for desktop applications
 /// Handles the authorization code flow with local redirect
 class GoogleOAuthService {
   final Function(String) log;
 
-  // OAuth 2.0 credentials loaded from lib/config/secrets.dart (not committed to git)
-  // To set up: copy lib/config/secrets.example.dart to secrets.dart and fill in your values
-  // Get credentials from: https://console.cloud.google.com/apis/credentials
-  static const String clientId = Secrets.googleClientId;
-  static const String clientSecret = Secrets.googleClientSecret;
+  // OAuth 2.0 credentials are injected at build time via --dart-define.
+  static const String clientId = String.fromEnvironment('GOOGLE_CLIENT_ID');
+  static const String clientSecret = String.fromEnvironment(
+    'GOOGLE_CLIENT_SECRET',
+  );
 
   // Required scopes for Drive file access
   static const List<String> scopes = [
     'https://www.googleapis.com/auth/drive.file',
   ];
+
+  static bool get isConfigured =>
+      clientId.isNotEmpty && clientSecret.isNotEmpty;
 
   GoogleOAuthService(this.log);
 
@@ -28,6 +30,14 @@ class GoogleOAuthService {
   /// Returns AccessCredentials containing access and refresh tokens
   Future<AccessCredentials?> authorize() async {
     try {
+      if (!isConfigured) {
+        await log(
+          'Google OAuth is not configured for this build. Provide '
+          'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET via --dart-define.',
+        );
+        return null;
+      }
+
       await log('Starting Google OAuth 2.0 authorization...');
 
       // Create client credentials
@@ -65,6 +75,15 @@ class GoogleOAuthService {
     AccessCredentials oldCredentials,
   ) async {
     try {
+      if (!isConfigured) {
+        await log(
+          'Google OAuth is not configured for this build. Stored tokens '
+          'cannot be refreshed without GOOGLE_CLIENT_ID and '
+          'GOOGLE_CLIENT_SECRET.',
+        );
+        return null;
+      }
+
       await log('Refreshing access token...');
 
       final clientCredentials = ClientId(clientId, clientSecret);

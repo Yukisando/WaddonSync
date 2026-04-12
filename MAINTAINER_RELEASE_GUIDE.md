@@ -1,18 +1,13 @@
 # Maintainer Release Guide
 
-This document is for maintainers. The user-facing product overview stays in README.md.
+This document is for maintainers only. User-facing install and usage info belongs in README.md.
 
 ## Release Artifacts
 
-The release workflow publishes these user downloads:
+The release workflow publishes only these user downloads:
 
 - WaddonSync-Installer-<version>.exe (recommended)
 - WaddonSync-Portable-<version>.zip
-
-It also publishes maintainer assets:
-
-- checksums-<version>.txt
-- winget-metadata-<version>.json
 
 ## Optional Code Signing Secrets
 
@@ -24,22 +19,29 @@ To sign installer and app binaries in CI, set repository secrets:
 
 If secrets are not set, releases still build and publish unsigned files.
 
+## Google OAuth Build Configuration
+
+Google OAuth values are passed into Flutter builds with `--dart-define`.
+
+For CI releases, set these repository secrets:
+
+- GOOGLE_CLIENT_ID
+- GOOGLE_CLIENT_SECRET
+
+The release workflow injects them into `flutter build windows`.
+
 ## SHA256 Verification
 
-Each release contains checksums-<version>.txt.
-
-Verify locally:
+Generate hashes locally when needed:
 
 ```powershell
 Get-FileHash .\WaddonSync-Installer-<version>.exe -Algorithm SHA256
 Get-FileHash .\WaddonSync-Portable-<version>.zip -Algorithm SHA256
 ```
 
-Compare with checksums file entries.
+## Defender / PUA Notes
 
-## Defender / PUA Submission Notes
-
-When reporting a false positive:
+When reporting a false positive, collect:
 
 - Category: Incorrectly detected as PUA (potentially unwanted application)
 - Detection name: from Windows Security -> Virus & threat protection -> Protection history
@@ -55,7 +57,20 @@ If warnings are from Edge download reputation and no Defender event exists, Prot
 
 ## Winget Update Flow
 
-Use the release metadata file winget-metadata-<version>.json and generate manifests:
+Create a metadata JSON file locally and generate manifests from it:
+
+```json
+{
+	"PackageIdentifier": "Yukisando.WaddonSync",
+	"PackageVersion": "<version>",
+	"InstallerType": "inno",
+	"InstallerUrl": "https://github.com/Yukisando/WaddonSync/releases/download/v<version>/WaddonSync-Installer-<version>.exe",
+	"InstallerSha256": "<sha256>",
+	"Scope": "machine"
+}
+```
+
+Then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\generate_winget_manifests.ps1 -MetadataPath .\winget-metadata-<version>.json

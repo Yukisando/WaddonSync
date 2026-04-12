@@ -24,7 +24,7 @@ migrate_working_dir/
 #.vscode/
 
 # Secrets / credentials
-lib/config/secrets.dart
+dart_defines.json
 
 # Flutter/Dart/Pub related
 **/doc/api/

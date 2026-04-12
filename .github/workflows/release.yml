@@ -51,17 +51,6 @@ jobs:
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
         
-      - name: Generate secrets.dart
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path lib/config | Out-Null
-          @"
-          class Secrets {
-            static const String googleClientId = '${{ secrets.GOOGLE_CLIENT_ID }}';
-            static const String googleClientSecret = '${{ secrets.GOOGLE_CLIENT_SECRET }}';
-          }
-          "@ | Out-File -FilePath lib/config/secrets.dart -Encoding utf8
-
       - name: Install dependencies
         run: flutter pub get
 
@@ -100,7 +89,16 @@ jobs:
           echo "TIMESTAMP_URL=$timestampUrl" >> $env:GITHUB_OUTPUT
         
       - name: Build Windows executable
-        run: flutter build windows --release --build-name ${{ steps.version.outputs.VERSION }} --build-number ${{ steps.version.outputs.BUILD_NUMBER }}
+        shell: pwsh
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          flutter build windows --release `
+            --dart-define=GOOGLE_CLIENT_ID=$env:GOOGLE_CLIENT_ID `
+            --dart-define=GOOGLE_CLIENT_SECRET=$env:GOOGLE_CLIENT_SECRET `
+            --build-name ${{ steps.version.outputs.VERSION }} `
+            --build-number ${{ steps.version.outputs.BUILD_NUMBER }}
 
       - name: Sign app executable (optional)
         if: steps.codesign.outputs.ENABLED == 'true'
@@ -181,51 +179,6 @@ jobs:
           echo "PORTABLE_ASSET_NAME=$releaseName.zip" >> $env:GITHUB_OUTPUT
         id: portable
 
-      - name: Generate checksums and winget metadata
-        id: artifacts_meta
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.VERSION }}"
-          $tag = "v$version"
-          $installerName = "${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}"
-          $portableName = "${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}"
-
-          if (-not (Test-Path $installerName)) {
-            throw "Installer asset missing for checksum: $installerName"
-          }
-          if (-not (Test-Path $portableName)) {
-            throw "Portable asset missing for checksum: $portableName"
-          }
-
-          $installerHash = (Get-FileHash $installerName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $portableHash = (Get-FileHash $portableName -Algorithm SHA256).Hash.ToLowerInvariant()
-
-          $checksumsFile = "checksums-$version.txt"
-          @(
-            "SHA256 checksums for WaddonSync v$version",
-            "",
-            "$installerHash  $installerName",
-            "$portableHash  $portableName"
-          ) | Out-File -FilePath $checksumsFile -Encoding utf8
-
-          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$installerName"
-          $wingetMetaFile = "winget-metadata-$version.json"
-
-          $wingetObject = [ordered]@{
-            PackageIdentifier = "Yukisando.WaddonSync"
-            PackageVersion = $version
-            InstallerType = "inno"
-            InstallerUrl = $installerUrl
-            InstallerSha256 = $installerHash
-            Scope = "machine"
-            ReleaseTag = $tag
-          }
-          $wingetObject | ConvertTo-Json | Out-File -FilePath $wingetMetaFile -Encoding utf8
-
-          echo "CHECKSUMS_ASSET_NAME=$checksumsFile" >> $env:GITHUB_OUTPUT
-          echo "WINGET_META_ASSET_NAME=$wingetMetaFile" >> $env:GITHUB_OUTPUT
-          echo "INSTALLER_SHA256=$installerHash" >> $env:GITHUB_OUTPUT
-        
       - name: Generate release notes
         id: release_notes
         shell: pwsh
@@ -243,6 +196,10 @@ jobs:
              - Lets users choose install folder
              - Adds native uninstall entry in Windows Installed Apps
            2. Portable option: download ``${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}``, extract, and run ``waddonsync.exe``
+
+          ### Downloads included in this release
+          - Installer EXE
+          - Portable ZIP
           
           ### Features
           - Backup and sync World of Warcraft addons and settings
@@ -255,14 +212,6 @@ jobs:
 
           ### Signing
           - Installer/app binaries are Authenticode-signed when code-signing secrets are configured in the repository.
-
-          ### Integrity
-          - SHA256 checksums are published in ``${{ steps.artifacts_meta.outputs.CHECKSUMS_ASSET_NAME }}``.
-
-          ### Winget
-          - Use ``${{ steps.artifacts_meta.outputs.WINGET_META_ASSET_NAME }}`` for winget submission values.
-          - Package identifier: ``Yukisando.WaddonSync``
-          - Installer SHA256: ``${{ steps.artifacts_meta.outputs.INSTALLER_SHA256 }}``
           
           ---
           *Automated build from commit ${{ github.sha }}*
@@ -280,8 +229,6 @@ jobs:
           files: |
             ${{ steps.portable.outputs.PORTABLE_ASSET_NAME }}
             ${{ steps.installer.outputs.INSTALLER_ASSET_NAME }}
-            ${{ steps.artifacts_meta.outputs.CHECKSUMS_ASSET_NAME }}
-            ${{ steps.artifacts_meta.outputs.WINGET_META_ASSET_NAME }}
           draft: false
           prerelease: false
         env:
