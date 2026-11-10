@@ -7,6 +7,7 @@ It is for players who want a simple way to save their addon setup, keep local ba
 ## What it does
 
 - Back up your WoW WTF and Interface folders.
+- Pick which game versions to back up and restore (Retail, Classic, Classic Era, Anniversary, PTRs, and any other `_version_` folder found in your WoW folder) with checkboxes.
 - Include or exclude SavedVariables, keybindings, and Config.wtf.
 - Restore local backups with restore filters.
 - Upload backups to Google Drive.
@@ -64,8 +65,8 @@ Things users should know before using WaddonSync:
 
 ## First-time setup
 
-1. Select your World of Warcraft folder.
-2. Choose what you want to include in backups.
+1. Select your World of Warcraft folder (the one containing `_retail_`, `_classic_`, etc.).
+2. Tick the game versions and choose what you want to include in backups.
 3. Create a local backup.
 4. If you want cloud backups, connect Google Drive inside the app.
 

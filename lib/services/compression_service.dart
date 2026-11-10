@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+
 import 'package:archive/archive.dart';
 import 'package:path/path.dart' as p;
 
@@ -91,10 +93,15 @@ class CompressionService {
   }
 }
 
-// Prepare temp directory for 7z compression (isolate function)
-String prepareTempDirFor7z(Map<String, dynamic> args) {
-  final wtfDir = args['wtfDir'] as String;
-  final interfaceDir = args['interfaceDir'] as String;
+const String backupMetaFileName = 'waddonsync_backup_meta.json';
+
+/// Collects (archive path -> source file) pairs for every selected flavor.
+///
+/// Expected args: `flavors` (list of `WowFlavor.toArgs()` maps), the include
+/// flags, and `excludeCaches`. Each flavor's files are stored under its folder
+/// name (e.g. `_retail_/WTF/...`); an empty folder stores them at the top level.
+Map<String, String> collectBackupEntries(Map<String, dynamic> args) {
+  final flavors = (args['flavors'] as List).cast<Map>();
   final includeSavedVars = args['includeSavedVars'] as bool;
   final includeConfig = args['includeConfig'] as bool;
   final includeBindings = args['includeBindings'] as bool;
@@ -102,65 +109,53 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
   final interfaceAddonsOnly = (args['interfaceAddonsOnly'] as bool?) ?? false;
   final excludeCaches = args['excludeCaches'] as bool;
 
-  final tempDir = Directory.systemTemp.createTempSync('waddonsync-');
+  final entries = <String, String>{};
 
-  void copyFileToStore(String storePath, File file) {
-    final dest = File(p.join(tempDir.path, storePath));
-    dest.parent.createSync(recursive: true);
-    file.copySync(dest.path);
-  }
+  for (final flavor in flavors) {
+    final folder = flavor['folder'] as String;
+    final wtfDir = flavor['wtfDir'] as String;
+    final interfaceDir = flavor['interfaceDir'] as String;
 
-  // Use top-level isHiddenOrDotDir function defined above
-
-  final wtfDirObj = Directory(wtfDir);
-  if (wtfDirObj.existsSync()) {
-    if (includeSavedVars) {
-      for (final entity in wtfDirObj.listSync(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File) {
+    final wtfDirObj = Directory(wtfDir);
+    if (wtfDirObj.existsSync()) {
+      if (includeSavedVars || includeBindings) {
+        for (final entity in wtfDirObj.listSync(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (entity is! File) continue;
           final rel = p.relative(entity.path, from: wtfDir);
           if (isHiddenOrDotDir(rel)) continue;
           final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          if (parts.contains('savedvariables')) {
-            final store = p.join('WTF', p.relative(entity.path, from: wtfDir));
-            copyFileToStore(store, entity);
+          final baseName = p.basename(entity.path).toLowerCase();
+          final isSavedVar = parts.contains('savedvariables');
+          final isBinding =
+              baseName.contains('binding') || baseName == 'bindings-cache.wtf';
+          if ((includeSavedVars && isSavedVar) ||
+              (includeBindings && isBinding)) {
+            entries[p.join(folder, 'WTF', rel)] = entity.path;
           }
-          if (includeBindings) {
-            final baseName = p.basename(entity.path).toLowerCase();
-            if (baseName.contains('binding') ||
-                baseName == 'bindings-cache.wtf') {
-              final store = p.join(
-                'WTF',
-                p.relative(entity.path, from: wtfDir),
-              );
-              copyFileToStore(store, entity);
-            }
-          }
+        }
+      }
+
+      if (includeConfig) {
+        final cfg = File(p.join(wtfDir, 'Config.wtf'));
+        if (cfg.existsSync()) {
+          entries[p.join(folder, 'WTF', 'Config.wtf')] = cfg.path;
         }
       }
     }
 
-    if (includeConfig) {
-      final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync() && !isHiddenOrDotDir('Config.wtf')) {
-        copyFileToStore(p.join('WTF', 'Config.wtf'), cfg);
-      }
-    }
-  }
-
-  final interfaceDirObj = Directory(interfaceDir);
-  if (includeInterface && interfaceDirObj.existsSync()) {
-    for (final entity in interfaceDirObj.listSync(
-      recursive: true,
-      followLinks: false,
-    )) {
-      if (entity is File) {
+    final interfaceDirObj = Directory(interfaceDir);
+    if (includeInterface && interfaceDirObj.existsSync()) {
+      for (final entity in interfaceDirObj.listSync(
+        recursive: true,
+        followLinks: false,
+      )) {
+        if (entity is! File) continue;
         final rel = p.relative(entity.path, from: interfaceDir);
         if (isHiddenOrDotDir(rel)) continue;
         final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        // AddOns-only filter: skip files not under AddOns/
         if (interfaceAddonsOnly && (parts.isEmpty || parts.first != 'addons')) {
           continue;
         }
@@ -168,100 +163,44 @@ String prepareTempDirFor7z(Map<String, dynamic> args) {
             (parts.contains('cache') || parts.contains('wdb'))) {
           continue;
         }
-        final store = p.join(
-          'Interface',
-          p.relative(entity.path, from: interfaceDir),
-        );
-        copyFileToStore(store, entity);
+        entries[p.join(folder, 'Interface', rel)] = entity.path;
       }
     }
   }
+
+  return entries;
+}
+
+// Prepare temp directory for 7z compression (isolate function).
+// Same args as collectBackupEntries plus `meta` (JSON string).
+String prepareTempDirFor7z(Map<String, dynamic> args) {
+  final tempDir = Directory.systemTemp.createTempSync('waddonsync-');
+
+  collectBackupEntries(args).forEach((storePath, sourcePath) {
+    final dest = File(p.join(tempDir.path, storePath));
+    dest.parent.createSync(recursive: true);
+    File(sourcePath).copySync(dest.path);
+  });
+
+  File(
+    p.join(tempDir.path, backupMetaFileName),
+  ).writeAsStringSync(args['meta'] as String);
 
   return tempDir.path;
 }
 
-// Perform ZIP compression in isolate
+// Perform ZIP compression in isolate.
+// Same args as collectBackupEntries plus `meta` (JSON string).
 List<int> performZip(Map<String, dynamic> args) {
-  final wtfDir = args['wtfDir'] as String;
-  final interfaceDir = args['interfaceDir'] as String;
-  final includeSavedVars = args['includeSavedVars'] as bool;
-  final includeConfig = args['includeConfig'] as bool;
-  final includeBindings = args['includeBindings'] as bool;
-  final includeInterface = args['includeInterface'] as bool;
-  final interfaceAddonsOnly = (args['interfaceAddonsOnly'] as bool?) ?? false;
-  final excludeCaches = args['excludeCaches'] as bool;
-
   final archive = Archive();
 
-  void addFileAt(String storePath, File file) {
-    final bytes = file.readAsBytesSync();
+  final metaBytes = utf8.encode(args['meta'] as String);
+  archive.addFile(ArchiveFile(backupMetaFileName, metaBytes.length, metaBytes));
+
+  collectBackupEntries(args).forEach((storePath, sourcePath) {
+    final bytes = File(sourcePath).readAsBytesSync();
     archive.addFile(ArchiveFile(storePath, bytes.length, bytes));
-  }
-
-  final wtfDirObj = Directory(wtfDir);
-  if (wtfDirObj.existsSync()) {
-    if (includeSavedVars) {
-      for (final entity in wtfDirObj.listSync(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File) {
-          final rel = p.relative(entity.path, from: wtfDir);
-          if (isHiddenOrDotDir(rel)) continue;
-          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          if (parts.contains('savedvariables')) {
-            final store = p.join('WTF', p.relative(entity.path, from: wtfDir));
-            addFileAt(store, entity);
-          }
-          if (includeBindings) {
-            final baseName = p.basename(entity.path).toLowerCase();
-            if (baseName.contains('binding') ||
-                baseName == 'bindings-cache.wtf') {
-              final store = p.join(
-                'WTF',
-                p.relative(entity.path, from: wtfDir),
-              );
-              addFileAt(store, entity);
-            }
-          }
-        }
-      }
-    }
-
-    if (includeConfig) {
-      final cfg = File(p.join(wtfDir, 'Config.wtf'));
-      if (cfg.existsSync() && !isHiddenOrDotDir('Config.wtf')) {
-        addFileAt(p.join('WTF', 'Config.wtf'), cfg);
-      }
-    }
-  }
-
-  final interfaceDirObj = Directory(interfaceDir);
-  if (includeInterface && interfaceDirObj.existsSync()) {
-    for (final entity in interfaceDirObj.listSync(
-      recursive: true,
-      followLinks: false,
-    )) {
-      if (entity is File) {
-        final rel = p.relative(entity.path, from: interfaceDir);
-        if (isHiddenOrDotDir(rel)) continue;
-        final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-        // AddOns-only filter: skip files not under AddOns/
-        if (interfaceAddonsOnly && (parts.isEmpty || parts.first != 'addons')) {
-          continue;
-        }
-        if (excludeCaches &&
-            (parts.contains('cache') || parts.contains('wdb'))) {
-          continue;
-        }
-        final store = p.join(
-          'Interface',
-          p.relative(entity.path, from: interfaceDir),
-        );
-        addFileAt(store, entity);
-      }
-    }
-  }
+  });
 
   final zipEncoder = ZipEncoder();
   final zipData = zipEncoder.encode(archive, level: Deflate.BEST_COMPRESSION)!;

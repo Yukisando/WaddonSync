@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'services/google_drive_service.dart';
 import 'services/compression_service.dart';
 import 'services/app_update_service.dart';
+import 'services/wow_installation.dart';
 
 void main() {
   // Capture Flutter framework errors and run the app in a guarded zone.
@@ -102,23 +103,31 @@ class _HomePageState extends State<HomePage> {
 
   bool isWorking = false;
 
-  // Derived paths. Prefer the _retail_ subfolder when present.
-  String? get _effectiveWowRoot {
-    if (wowRootPath == null) return null;
-    // If user selected the retail folder directly, honor it
-    if (p.basename(wowRootPath!) == '_retail_') return wowRootPath;
-    // If a _retail_ subfolder exists under the selected root, prefer it
-    final retailCandidate = p.join(wowRootPath!, '_retail_');
-    if (Directory(retailCandidate).existsSync()) return retailCandidate;
-    // Fallback to the root as given
-    return wowRootPath;
+  // Game versions (_retail_, _classic_era_, ...) found under wowRootPath.
+  List<WowFlavor> detectedFlavors = [];
+  // Flavor folders the user chose to back up. Null until loaded from settings
+  // or defaulted, so a fresh install selects every detected version.
+  Set<String>? _selectedFlavorFolders;
+  // Flavor folders chosen in the last restore dialog (defaults to backup selection).
+  Set<String>? _applyFlavorFolders;
+
+  Set<String> get selectedFlavorFolders => _selectedFlavorFolders ?? {};
+
+  List<WowFlavor> get selectedFlavors => detectedFlavors
+      .where((f) => selectedFlavorFolders.contains(f.folder))
+      .toList();
+
+  void _setWowRoot(String path) {
+    wowRootPath = normalizeWowRoot(path);
+    _rescanFlavors();
   }
 
-  String? get wtfPath =>
-      _effectiveWowRoot != null ? p.join(_effectiveWowRoot!, 'WTF') : null;
-  String? get interfacePath => _effectiveWowRoot != null
-      ? p.join(_effectiveWowRoot!, 'Interface')
-      : null;
+  void _rescanFlavors() {
+    detectedFlavors = wowRootPath == null ? [] : detectWowFlavors(wowRootPath!);
+    if (_selectedFlavorFolders == null && detectedFlavors.isNotEmpty) {
+      _selectedFlavorFolders = detectedFlavors.map((f) => f.folder).toSet();
+    }
+  }
 
   // Backup options
   bool includeSavedVars = true;
@@ -420,20 +429,15 @@ class _HomePageState extends State<HomePage> {
 
   // Very simple Windows auto-detect: check common Program Files locations
   void _attemptAutoDetect() {
-    if (wtfPath != null && interfacePath != null) return;
+    if (wowRootPath != null) return;
     final pf = Platform.environment['ProgramFiles'] ?? r'C:\Program Files';
     final pfx86 =
         Platform.environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)';
-    final candidates = [pf, pfx86];
-    for (final base in candidates) {
-      final wowRetail = p.join(base, 'World of Warcraft');
-      final wowRetailRetail = p.join(base, 'World of Warcraft', '_retail_');
-      if (Directory(wowRetail).existsSync()) {
-        // Use the WoW root when found
-        setState(() => wowRootPath ??= wowRetail);
-      }
-      if (Directory(wowRetailRetail).existsSync()) {
-        setState(() => wowRootPath ??= wowRetailRetail);
+    for (final base in [pf, pfx86]) {
+      final wowRoot = p.join(base, 'World of Warcraft');
+      if (Directory(wowRoot).existsSync()) {
+        setState(() => _setWowRoot(wowRoot));
+        return;
       }
     }
   }
@@ -495,7 +499,16 @@ class _HomePageState extends State<HomePage> {
         interfaceAddonsOnly =
             (m['interfaceAddonsOnly'] as bool?) ?? interfaceAddonsOnly;
         excludeCaches = (m['excludeCaches'] as bool?) ?? excludeCaches;
-        wowRootPath = (m['wowRootPath'] as String?) ?? wowRootPath;
+        final savedFlavors = m['selectedFlavors'] as List?;
+        if (savedFlavors != null) {
+          _selectedFlavorFolders = savedFlavors.cast<String>().toSet();
+        }
+        final savedRoot = m['wowRootPath'] as String?;
+        if (savedRoot != null) {
+          _setWowRoot(savedRoot);
+        } else {
+          _rescanFlavors();
+        }
       });
     } catch (e) {
       // ignore
@@ -513,6 +526,7 @@ class _HomePageState extends State<HomePage> {
         'interfaceAddonsOnly': interfaceAddonsOnly,
         'excludeCaches': excludeCaches,
         'wowRootPath': wowRootPath,
+        'selectedFlavors': selectedFlavorFolders.toList(),
       };
       await f.writeAsString(json.encode(obj));
       if (!mounted) return;
@@ -627,96 +641,27 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // Create a 7z archive directly from source files (returns null on failure)
-  Future<File?> _create7zArchive(String timestamp, String exe7z) async {
+  // Keep at most 2 local backups (both .zip and .7z).
+  Future<void> _pruneLocalBackups(Directory appDir) async {
     try {
-      await _appendLog('Creating 7z archive with maximum compression...');
-
-      // Prepare a temporary folder with the exact files we want to compress
-      final tempDirPath = await compute(prepareTempDirFor7z, {
-        'wtfDir': wtfPath ?? '',
-        'interfaceDir': interfacePath ?? '',
-        'includeSavedVars': includeSavedVars,
-        'includeConfig': includeConfig,
-        'includeBindings': includeBindings,
-        'includeInterface': includeInterface,
-        'interfaceAddonsOnly': interfaceAddonsOnly,
-        'excludeCaches': excludeCaches,
-      });
-
-      if (tempDirPath.isEmpty) {
-        throw Exception('Failed to prepare temp dir for 7z');
-      }
-
-      final outFile = await _getLocalFile('waddonsync_backup_$timestamp.7z');
-      final outPath = outFile.path;
-
-      // Use ultra compression settings for maximum file size reduction
-      // -t7z: 7z format, -mx=9: ultra compression, -m0=lzma2: best algorithm
-      // -mfb=64: fast bytes, -md=32m: dictionary size, -ms=on: solid archive
-      final proc = await Process.run(exe7z, [
-        'a',
-        '-t7z',
-        '-mx=9',
-        '-m0=lzma2',
-        '-mfb=64',
-        '-md=32m',
-        '-ms=on',
-        outPath,
-        '.',
-      ], workingDirectory: tempDirPath);
-
-      // Clean up the temp folder regardless of success/failure
-      try {
-        final td = Directory(tempDirPath);
-        if (await td.exists()) await td.delete(recursive: true);
-      } catch (e) {
-        await _appendLog('Failed to cleanup temp dir: $e');
-      }
-
-      if (proc.exitCode == 0) {
-        if (await outFile.exists()) {
-          final sevenzSize = await outFile.length();
-          await _appendLog(
-            '7z archive created: ${outFile.path} (${(sevenzSize / (1024 * 1024)).toStringAsFixed(2)} MB)',
-          );
-
-          // Prune old backup files (both .zip and .7z) to keep at most 2 backups
-          try {
-            final appDir = outFile.parent;
-            final backups = appDir.listSync().whereType<File>().where((f) {
-              final ext = p.extension(f.path).toLowerCase();
-              return ext == '.zip' || ext == '.7z';
-            }).toList();
-            backups.sort(
-              (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
-            );
-            if (backups.length > 2) {
-              final toDelete = backups.sublist(2);
-              for (final f in toDelete) {
-                try {
-                  await f.delete();
-                  await _appendLog('Pruned old backup: ${f.path}');
-                } catch (e) {
-                  // ignore individual delete failures
-                }
-              }
-            }
-          } catch (e) {
-            await _appendLog('Failed to prune backups: $e');
-          }
-
-          return outFile;
+      final backups = appDir.listSync().whereType<File>().where((f) {
+        final ext = p.extension(f.path).toLowerCase();
+        return ext == '.zip' || ext == '.7z';
+      }).toList();
+      backups.sort(
+        (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+      );
+      for (final f in backups.skip(2)) {
+        try {
+          await f.delete();
+          await _appendLog('Pruned old backup: ${f.path}');
+        } catch (_) {
+          // ignore individual delete failures
         }
-      } else {
-        await _appendLog(
-          '7-Zip failed (exit code ${proc.exitCode}): ${proc.stdout}\n${proc.stderr}',
-        );
       }
-    } catch (e, st) {
-      await _appendLog('7-Zip exception: $e\n$st');
+    } catch (e) {
+      await _appendLog('Failed to prune backups: $e');
     }
-    return null;
   }
 
   Future<bool> _checkNetwork({String host = 'www.google.com'}) async {
@@ -736,210 +681,72 @@ class _HomePageState extends State<HomePage> {
     final result = await FilePicker.platform.getDirectoryPath(
       dialogTitle: 'Select World of Warcraft root folder',
     );
-    if (result != null) setState(() => wowRootPath = result);
+    if (result == null) return;
+    setState(() {
+      // A newly picked folder starts with all of its versions selected.
+      _selectedFlavorFolders = null;
+      _applyFlavorFolders = null;
+      _setWowRoot(result);
+    });
+    await _saveSettings(showSnack: false);
   }
 
-  Future<File> createZip({
-    required String wtfDir,
-    required String interfaceDir,
-    required bool includeSavedVars,
-    required bool includeConfig,
-    required bool includeBindings,
-    required bool includeInterface,
-    required bool interfaceAddonsOnly,
-    required bool excludeCaches,
-  }) async {
+  Future<File> createZip() async {
+    final flavors = selectedFlavors;
+    if (flavors.isEmpty) {
+      throw Exception('No game version selected');
+    }
     setState(() => isWorking = true);
-    final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
-    final backupId = const Uuid().v4();
-
-    // Check if 7-Zip is available - if so, create 7z directly without ZIP
-    final compressionService = CompressionService(_appendLog);
-    final exe = await compressionService.find7zipExecutable();
-    if (exe != null) {
-      await _appendLog('7-Zip found, creating 7z archive directly...');
-      // Write metadata file with backupId
-      final tempMetaDir = await Directory.systemTemp.createTemp(
-        'waddonsync-meta-',
-      );
-      final metaFile = File('${tempMetaDir.path}/waddonsync_backup_meta.json');
-      await metaFile.writeAsString(
-        jsonEncode({'backupId': backupId, 'timestamp': timestamp}),
-      );
-      // Prepare temp dir for 7z as before
-      final tempDirPath = await compute(prepareTempDirFor7z, {
-        'wtfDir': wtfPath ?? '',
-        'interfaceDir': interfacePath ?? '',
+    try {
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final args = <String, dynamic>{
+        'flavors': flavors.map((f) => f.toArgs()).toList(),
         'includeSavedVars': includeSavedVars,
         'includeConfig': includeConfig,
         'includeBindings': includeBindings,
         'includeInterface': includeInterface,
         'interfaceAddonsOnly': interfaceAddonsOnly,
         'excludeCaches': excludeCaches,
-      });
-      if (tempDirPath.isEmpty) {
-        throw Exception('Failed to prepare temp dir for 7z');
-      }
-      // Copy meta file into temp dir
-      await metaFile.copy('$tempDirPath/waddonsync_backup_meta.json');
-      final outFile = await _create7zArchive(timestamp, exe);
-      await tempMetaDir.delete(recursive: true);
-      if (outFile != null) {
-        setState(() {
-          lastZipPath = outFile.path;
-          isWorking = false;
-        });
-        return outFile;
-      }
-      await _appendLog('7-Zip creation failed, falling back to ZIP...');
-    }
+        'meta': jsonEncode({
+          'backupId': const Uuid().v4(),
+          'timestamp': timestamp,
+          'formatVersion': 2,
+          'flavors': flavors.map((f) => f.folder).toList(),
+        }),
+      };
+      await _appendLog('Backing up: ${flavors.map((f) => f.label).join(', ')}');
 
-    // Fallback to ZIP creation
-    File outFile = await _getLocalFile('waddonsync_backup_$timestamp.zip');
-
-    final archive = Archive();
-    // Add backup metadata file to archive
-    final metaContent = jsonEncode({
-      'backupId': backupId,
-      'timestamp': timestamp,
-    });
-    archive.addFile(
-      ArchiveFile(
-        'waddonsync_backup_meta.json',
-        metaContent.length,
-        utf8.encode(metaContent),
-      ),
-    );
-
-    // Helper to check for hidden/dot directories
-    bool isHiddenOrDotDir(String path) {
-      final parts = p.split(path);
-      return parts.any((part) => part.startsWith('.'));
-    }
-
-    Future<void> addFileAt(String storePath, File file) async {
-      final bytes = await file.readAsBytes();
-      archive.addFile(ArchiveFile(storePath, bytes.length, bytes));
-    }
-
-    final wtfDirObj = Directory(wtfDir);
-    if (wtfDirObj.existsSync()) {
-      // SavedVariables files: include all files under any SavedVariables folder
-      if (includeSavedVars) {
-        await for (final entity in wtfDirObj.list(
-          recursive: true,
-          followLinks: false,
-        )) {
-          if (entity is File) {
-            final rel = p.relative(entity.path, from: wtfDir);
-            // Skip hidden/dot directories
-            if (isHiddenOrDotDir(rel)) continue;
-            final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-            if (parts.contains('savedvariables')) {
-              final store = p.join(
-                'WTF',
-                p.relative(entity.path, from: wtfDir),
-              );
-              await addFileAt(store, entity);
-            }
-            // include bindings files if selected
-            if (includeBindings) {
-              final baseName = p.basename(entity.path).toLowerCase();
-              if (baseName.contains('binding') ||
-                  baseName == 'bindings-cache.wtf') {
-                final store = p.join(
-                  'WTF',
-                  p.relative(entity.path, from: wtfDir),
-                );
-                await addFileAt(store, entity);
-              }
-            }
-          }
+      final compressionService = CompressionService(_appendLog);
+      final exe = await compressionService.find7zipExecutable();
+      if (exe != null) {
+        await _appendLog('7-Zip found, creating 7z archive directly...');
+        final tempDirPath = await compute(prepareTempDirFor7z, args);
+        final outPath = (await _getLocalFile(
+          'waddonsync_backup_$timestamp.7z',
+        )).path;
+        final outFile = await compressionService.create7zArchive(
+          timestamp: timestamp,
+          exe7z: exe,
+          tempDirPath: tempDirPath,
+          outputPath: outPath,
+        );
+        if (outFile != null) {
+          await _pruneLocalBackups(outFile.parent);
+          setState(() => lastZipPath = outFile.path);
+          return outFile;
         }
+        await _appendLog('7-Zip creation failed, falling back to ZIP...');
       }
 
-      if (includeConfig) {
-        final cfg = File(p.join(wtfDir, 'Config.wtf'));
-        if (await cfg.exists()) {
-          await addFileAt(p.join('WTF', 'Config.wtf'), cfg);
-        }
-      }
+      final outFile = await _getLocalFile('waddonsync_backup_$timestamp.zip');
+      final zipBytes = await compute(performZip, args);
+      await outFile.writeAsBytes(zipBytes, flush: true);
+      await _pruneLocalBackups(outFile.parent);
+      setState(() => lastZipPath = outFile.path);
+      return outFile;
+    } finally {
+      if (mounted) setState(() => isWorking = false);
     }
-
-    final interfaceDirObj = Directory(interfaceDir);
-    if (includeInterface && interfaceDirObj.existsSync()) {
-      await for (final entity in interfaceDirObj.list(
-        recursive: true,
-        followLinks: false,
-      )) {
-        if (entity is File) {
-          final rel = p.relative(entity.path, from: interfaceDir);
-          // Skip hidden/dot directories
-          if (isHiddenOrDotDir(rel)) continue;
-          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-          // AddOns-only filter: skip files not under AddOns/
-          if (interfaceAddonsOnly &&
-              (parts.isEmpty || parts.first != 'addons')) {
-            continue;
-          }
-          if (excludeCaches &&
-              (parts.contains('cache') || parts.contains('wdb'))) {
-            continue;
-          }
-          final store = p.join(
-            'Interface',
-            p.relative(entity.path, from: interfaceDir),
-          );
-          await addFileAt(store, entity);
-        }
-      }
-    }
-
-    // Offload heavy compression to an isolate and write the result here
-    final zipBytes = await compute(performZip, {
-      'wtfDir': wtfDir,
-      'interfaceDir': interfaceDir,
-      'includeSavedVars': includeSavedVars,
-      'includeConfig': includeConfig,
-      'includeBindings': includeBindings,
-      'includeInterface': includeInterface,
-      'interfaceAddonsOnly': interfaceAddonsOnly,
-      'excludeCaches': excludeCaches,
-    });
-
-    await outFile.writeAsBytes(zipBytes, flush: true);
-
-    // Prune old backup files (both .zip and .7z) to keep at most 2 backups
-    try {
-      final appDir = outFile.parent;
-      final zips = appDir.listSync().whereType<File>().where((f) {
-        final ext = p.extension(f.path).toLowerCase();
-        return ext == '.zip' || ext == '.7z';
-      }).toList();
-      zips.sort(
-        (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
-      );
-      if (zips.length > 2) {
-        final toDelete = zips.sublist(2);
-        for (final f in toDelete) {
-          try {
-            await f.delete();
-            await _appendLog('Pruned old backup: ${f.path}');
-          } catch (e) {
-            // ignore individual delete failures
-          }
-        }
-      }
-    } catch (e) {
-      await _appendLog('Failed to prune backups: $e');
-    }
-
-    setState(() {
-      lastZipPath = outFile.path;
-      isWorking = false;
-    });
-
-    return outFile;
   }
 
   Future<void> handleCreateZip() async {
@@ -952,16 +759,7 @@ class _HomePageState extends State<HomePage> {
           duration: Duration(seconds: 30),
         ),
       );
-      final zip = await createZip(
-        wtfDir: wtfPath!,
-        interfaceDir: interfacePath!,
-        includeSavedVars: includeSavedVars,
-        includeConfig: includeConfig,
-        includeBindings: includeBindings,
-        includeInterface: includeInterface,
-        interfaceAddonsOnly: interfaceAddonsOnly,
-        excludeCaches: excludeCaches,
-      );
+      final zip = await createZip();
       if (!mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1018,16 +816,7 @@ class _HomePageState extends State<HomePage> {
           duration: Duration(hours: 1),
         ),
       );
-      final zip = await createZip(
-        wtfDir: wtfPath!,
-        interfaceDir: interfacePath!,
-        includeSavedVars: includeSavedVars,
-        includeConfig: includeConfig,
-        includeBindings: includeBindings,
-        includeInterface: includeInterface,
-        interfaceAddonsOnly: interfaceAddonsOnly,
-        excludeCaches: excludeCaches,
-      );
+      final zip = await createZip();
       if (!mounted) return;
 
       // after creating a zip, upload it (shared logic)
@@ -1409,6 +1198,13 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // Backups without a flavor list predate multi-version support (retail only).
+  String _describeMetaFlavors(Map<String, dynamic> meta) {
+    final flavors = (meta['flavors'] as List?)?.cast<String>();
+    if (flavors == null || flavors.isEmpty) return flavorLabel(retailFolder);
+    return flavors.map(flavorLabel).join(', ');
+  }
+
   // Shows a dialog listing both local and online backups (Google Drive).
   // Latest is selected by default. Allows downloading/applying a selected
   // backup and deleting individual backups via the bin icon.
@@ -1447,6 +1243,7 @@ class _HomePageState extends State<HomePage> {
         );
         for (final f in files) {
           String? backupId;
+          String? versions;
           try {
             final ext = p.extension(f.path).toLowerCase();
             if (ext == '.zip') {
@@ -1465,6 +1262,7 @@ class _HomePageState extends State<HomePage> {
                     jsonDecode(utf8.decode(meta.content))
                         as Map<String, dynamic>;
                 backupId = metaJson['backupId'] as String?;
+                versions = _describeMetaFlavors(metaJson);
               }
             } else if (ext == '.7z') {
               // 7z: try to extract meta file using 7z command line
@@ -1489,6 +1287,7 @@ class _HomePageState extends State<HomePage> {
                       jsonDecode(await metaFile.readAsString())
                           as Map<String, dynamic>;
                   backupId = metaJson['backupId'] as String?;
+                  versions = _describeMetaFlavors(metaJson);
                 }
                 await tempDir.delete(recursive: true);
               }
@@ -1501,6 +1300,7 @@ class _HomePageState extends State<HomePage> {
             'size': f.lengthSync(),
             'modified': f.statSync().modified.toIso8601String(),
             'backupId': backupId,
+            'versions': versions,
           });
         }
       }
@@ -1568,6 +1368,7 @@ class _HomePageState extends State<HomePage> {
                     final modified = b['modified'] as String;
 
                     final backupId = b['backupId'] as String?;
+                    final versions = b['versions'] as String?;
                     final id = 'local:$path';
 
                     return ListTile(
@@ -1578,6 +1379,7 @@ class _HomePageState extends State<HomePage> {
                       title: Text(name),
                       subtitle: Text(
                         '$modified • ${(size / (1024 * 1024)).toStringAsFixed(2)} MB'
+                        '${versions != null ? '\nVersions: $versions' : ''}'
                         '${backupId != null ? '\nID: $backupId' : ''}',
                       ),
                       trailing: Row(
@@ -1879,123 +1681,10 @@ class _HomePageState extends State<HomePage> {
 
                         // Ask to apply
                         if (!mounted) return;
-                        bool tempApplySavedVars = applySavedVars;
-                        bool tempApplyConfig = applyConfig;
-                        bool tempApplyBindings = applyBindings;
-                        bool tempApplyInterface = applyInterface;
-                        bool tempApplyInterfaceAddonsOnly =
-                            applyInterfaceAddonsOnly;
-                        bool tempCleanApply = cleanApply;
-                        final apply = await showDialog<bool>(
-                          context: context,
-                          builder: (ctx) => StatefulBuilder(
-                            builder: (ctx3, setState3) => AlertDialog(
-                              title: const Text('Apply local backup'),
-                              content: SingleChildScrollView(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    SelectableText(
-                                      'Apply "${p.basename(path)}" to your World of Warcraft folders?',
-                                    ),
-                                    const SizedBox(height: 16),
-                                    const Text(
-                                      'Select what to apply:',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('SavedVariables'),
-                                      subtitle: const Text(
-                                        'Addon settings and data',
-                                      ),
-                                      value: tempApplySavedVars,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplySavedVars = v ?? false,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('Config.wtf'),
-                                      subtitle: const Text('Game settings'),
-                                      value: tempApplyConfig,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplyConfig = v ?? false,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('Keybindings'),
-                                      subtitle: const Text('Key bindings'),
-                                      value: tempApplyBindings,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplyBindings = v ?? false,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('Interface'),
-                                      subtitle: const Text('Addon files'),
-                                      value: tempApplyInterface,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplyInterface = v ?? false,
-                                      ),
-                                    ),
-                                    Padding(
-                                      padding: const EdgeInsets.only(
-                                        left: 24.0,
-                                      ),
-                                      child: CheckboxListTile(
-                                        title: const Text('AddOns only'),
-                                        subtitle: const Text(
-                                          'Skip other Interface folders (e.g. Icons)',
-                                        ),
-                                        value: tempApplyInterfaceAddonsOnly,
-                                        onChanged: tempApplyInterface
-                                            ? (v) => setState3(
-                                                () =>
-                                                    tempApplyInterfaceAddonsOnly =
-                                                        v ?? false,
-                                              )
-                                            : null,
-                                      ),
-                                    ),
-                                    const Divider(),
-                                    CheckboxListTile(
-                                      title: const Text('Clean apply'),
-                                      subtitle: const Text(
-                                        'Delete existing files before applying',
-                                      ),
-                                      value: tempCleanApply,
-                                      onChanged: (v) => setState3(
-                                        () => tempCleanApply = v ?? false,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.of(ctx).pop(false),
-                                  child: const Text('Cancel'),
-                                ),
-                                TextButton(
-                                  onPressed: () {
-                                    setState(() {
-                                      applySavedVars = tempApplySavedVars;
-                                      applyConfig = tempApplyConfig;
-                                      applyBindings = tempApplyBindings;
-                                      applyInterface = tempApplyInterface;
-                                      applyInterfaceAddonsOnly =
-                                          tempApplyInterfaceAddonsOnly;
-                                      cleanApply = tempCleanApply;
-                                    });
-                                    Navigator.of(ctx).pop(true);
-                                  },
-                                  child: const Text('Apply'),
-                                ),
-                              ],
-                            ),
-                          ),
+                        final apply = await _showApplyOptionsDialog(
+                          title: 'Apply local backup',
+                          message:
+                              'Apply "${p.basename(path)}" to your World of Warcraft folders?',
                         );
 
                         if (!ctx2.mounted) return;
@@ -2027,6 +1716,8 @@ class _HomePageState extends State<HomePage> {
                             applyInterfaceAddonsOnlyFilter:
                                 applyInterfaceAddonsOnly,
                             cleanMode: cleanApply,
+                            flavorFolders:
+                                _applyFlavorFolders ?? selectedFlavorFolders,
                           );
 
                           // Close loading
@@ -2096,123 +1787,10 @@ class _HomePageState extends State<HomePage> {
 
                         // Ask to apply like existing flow
                         if (!mounted) return;
-                        bool tempApplySavedVars = applySavedVars;
-                        bool tempApplyConfig = applyConfig;
-                        bool tempApplyBindings = applyBindings;
-                        bool tempApplyInterface = applyInterface;
-                        bool tempApplyInterfaceAddonsOnly =
-                            applyInterfaceAddonsOnly;
-                        bool tempCleanApply = cleanApply;
-                        final apply = await showDialog<bool>(
-                          context: context,
-                          builder: (ctx) => StatefulBuilder(
-                            builder: (ctx3, setState3) => AlertDialog(
-                              title: const Text('Backup downloaded'),
-                              content: SingleChildScrollView(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    SelectableText(
-                                      'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
-                                    ),
-                                    const SizedBox(height: 16),
-                                    const Text(
-                                      'Select what to apply:',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('SavedVariables'),
-                                      subtitle: const Text(
-                                        'Addon settings and data',
-                                      ),
-                                      value: tempApplySavedVars,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplySavedVars = v ?? false,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('Config.wtf'),
-                                      subtitle: const Text('Game settings'),
-                                      value: tempApplyConfig,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplyConfig = v ?? false,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('Keybindings'),
-                                      subtitle: const Text('Key bindings'),
-                                      value: tempApplyBindings,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplyBindings = v ?? false,
-                                      ),
-                                    ),
-                                    CheckboxListTile(
-                                      title: const Text('Interface'),
-                                      subtitle: const Text('Addon files'),
-                                      value: tempApplyInterface,
-                                      onChanged: (v) => setState3(
-                                        () => tempApplyInterface = v ?? false,
-                                      ),
-                                    ),
-                                    Padding(
-                                      padding: const EdgeInsets.only(
-                                        left: 24.0,
-                                      ),
-                                      child: CheckboxListTile(
-                                        title: const Text('AddOns only'),
-                                        subtitle: const Text(
-                                          'Skip other Interface folders (e.g. Icons)',
-                                        ),
-                                        value: tempApplyInterfaceAddonsOnly,
-                                        onChanged: tempApplyInterface
-                                            ? (v) => setState3(
-                                                () =>
-                                                    tempApplyInterfaceAddonsOnly =
-                                                        v ?? false,
-                                              )
-                                            : null,
-                                      ),
-                                    ),
-                                    const Divider(),
-                                    CheckboxListTile(
-                                      title: const Text('Clean apply'),
-                                      subtitle: const Text(
-                                        'Delete existing files before applying',
-                                      ),
-                                      value: tempCleanApply,
-                                      onChanged: (v) => setState3(
-                                        () => tempCleanApply = v ?? false,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.of(ctx).pop(false),
-                                  child: const Text('Cancel'),
-                                ),
-                                TextButton(
-                                  onPressed: () {
-                                    setState(() {
-                                      applySavedVars = tempApplySavedVars;
-                                      applyConfig = tempApplyConfig;
-                                      applyBindings = tempApplyBindings;
-                                      applyInterface = tempApplyInterface;
-                                      applyInterfaceAddonsOnly =
-                                          tempApplyInterfaceAddonsOnly;
-                                      cleanApply = tempCleanApply;
-                                    });
-                                    Navigator.of(ctx).pop(true);
-                                  },
-                                  child: const Text('Apply'),
-                                ),
-                              ],
-                            ),
-                          ),
+                        final apply = await _showApplyOptionsDialog(
+                          title: 'Backup downloaded',
+                          message:
+                              'Downloaded "$name" to your local backups.\n\nDo you want to apply this backup to your World of Warcraft folders now?',
                         );
 
                         if (!ctx2.mounted) return;
@@ -2244,6 +1822,8 @@ class _HomePageState extends State<HomePage> {
                             applyInterfaceAddonsOnlyFilter:
                                 applyInterfaceAddonsOnly,
                             cleanMode: cleanApply,
+                            flavorFolders:
+                                _applyFlavorFolders ?? selectedFlavorFolders,
                           );
 
                           // Close loading
@@ -2858,108 +2438,10 @@ try {
 
       // Ask user to confirm with config toggle
       if (!mounted) return;
-      bool tempApplySavedVars = applySavedVars;
-      bool tempApplyConfig = applyConfig;
-      bool tempApplyBindings = applyBindings;
-      bool tempApplyInterface = applyInterface;
-      bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
-      bool tempCleanApply = cleanApply;
-      final result = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => StatefulBuilder(
-          builder: (ctx2, setState2) => AlertDialog(
-            title: const Text('Apply latest backup'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Latest backup: $name\nSource: ${isLocal ? 'Local' : 'Google Drive'}',
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Select what to apply:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('SavedVariables'),
-                    subtitle: const Text('Addon settings and data'),
-                    value: tempApplySavedVars,
-                    onChanged: (v) =>
-                        setState2(() => tempApplySavedVars = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Config.wtf'),
-                    subtitle: const Text('Game settings'),
-                    value: tempApplyConfig,
-                    onChanged: (v) =>
-                        setState2(() => tempApplyConfig = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Keybindings'),
-                    subtitle: const Text('Key bindings'),
-                    value: tempApplyBindings,
-                    onChanged: (v) =>
-                        setState2(() => tempApplyBindings = v ?? false),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Interface'),
-                    subtitle: const Text('Addon files'),
-                    value: tempApplyInterface,
-                    onChanged: (v) =>
-                        setState2(() => tempApplyInterface = v ?? false),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 24.0),
-                    child: CheckboxListTile(
-                      title: const Text('AddOns only'),
-                      subtitle: const Text(
-                        'Skip other Interface folders (e.g. Icons)',
-                      ),
-                      value: tempApplyInterfaceAddonsOnly,
-                      onChanged: tempApplyInterface
-                          ? (v) => setState2(
-                              () => tempApplyInterfaceAddonsOnly = v ?? false,
-                            )
-                          : null,
-                    ),
-                  ),
-                  const Divider(),
-                  CheckboxListTile(
-                    title: const Text('Clean apply'),
-                    subtitle: const Text(
-                      'Delete existing files before applying',
-                    ),
-                    value: tempCleanApply,
-                    onChanged: (v) =>
-                        setState2(() => tempCleanApply = v ?? false),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    applySavedVars = tempApplySavedVars;
-                    applyConfig = tempApplyConfig;
-                    applyBindings = tempApplyBindings;
-                    applyInterface = tempApplyInterface;
-                    applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
-                    cleanApply = tempCleanApply;
-                  });
-                  Navigator.of(ctx).pop(true);
-                },
-                child: const Text('Apply'),
-              ),
-            ],
-          ),
-        ),
+      final result = await _showApplyOptionsDialog(
+        title: 'Apply latest backup',
+        message:
+            'Latest backup: $name\nSource: ${isLocal ? 'Local' : 'Google Drive'}',
       );
 
       if (result != true) {
@@ -3028,6 +2510,7 @@ try {
         applyInterfaceFilter: applyInterface,
         applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnly,
         cleanMode: cleanApply,
+        flavorFolders: _applyFlavorFolders ?? selectedFlavorFolders,
       );
       messenger.hideCurrentSnackBar();
       if (!mounted) return;
@@ -3048,6 +2531,144 @@ try {
     }
   }
 
+  // Restore options dialog shared by every apply flow. Persists the choices
+  // into the apply* fields and returns true when the user confirms.
+  Future<bool> _showApplyOptionsDialog({
+    required String title,
+    required String message,
+  }) async {
+    bool tempApplySavedVars = applySavedVars;
+    bool tempApplyConfig = applyConfig;
+    bool tempApplyBindings = applyBindings;
+    bool tempApplyInterface = applyInterface;
+    bool tempApplyInterfaceAddonsOnly = applyInterfaceAddonsOnly;
+    bool tempCleanApply = cleanApply;
+    final tempFlavors = {...(_applyFlavorFolders ?? selectedFlavorFolders)};
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx2, setState2) => AlertDialog(
+          title: Text(title),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SelectableText(message),
+                const SizedBox(height: 16),
+                const Text(
+                  'Game versions to restore:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                if (detectedFlavors.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Text('No game versions detected in the WoW folder.'),
+                  ),
+                for (final flavor in detectedFlavors)
+                  CheckboxListTile(
+                    title: Text(flavor.label),
+                    subtitle: Text(flavor.path),
+                    value: tempFlavors.contains(flavor.folder),
+                    onChanged: (v) => setState2(() {
+                      if (v ?? false) {
+                        tempFlavors.add(flavor.folder);
+                      } else {
+                        tempFlavors.remove(flavor.folder);
+                      }
+                    }),
+                  ),
+                const Divider(),
+                const Text(
+                  'Select what to apply:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                CheckboxListTile(
+                  title: const Text('SavedVariables'),
+                  subtitle: const Text('Addon settings and data'),
+                  value: tempApplySavedVars,
+                  onChanged: (v) =>
+                      setState2(() => tempApplySavedVars = v ?? false),
+                ),
+                CheckboxListTile(
+                  title: const Text('Config.wtf'),
+                  subtitle: const Text('Game settings'),
+                  value: tempApplyConfig,
+                  onChanged: (v) =>
+                      setState2(() => tempApplyConfig = v ?? false),
+                ),
+                CheckboxListTile(
+                  title: const Text('Keybindings'),
+                  subtitle: const Text(
+                    'Usually overwritten by Blizzard server sync on login',
+                  ),
+                  value: tempApplyBindings,
+                  onChanged: (v) =>
+                      setState2(() => tempApplyBindings = v ?? false),
+                ),
+                CheckboxListTile(
+                  title: const Text('Interface'),
+                  subtitle: const Text('Addon files'),
+                  value: tempApplyInterface,
+                  onChanged: (v) =>
+                      setState2(() => tempApplyInterface = v ?? false),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 24.0),
+                  child: CheckboxListTile(
+                    title: const Text('AddOns only'),
+                    subtitle: const Text(
+                      'Skip other Interface folders (e.g. Icons)',
+                    ),
+                    value: tempApplyInterfaceAddonsOnly,
+                    onChanged: tempApplyInterface
+                        ? (v) => setState2(
+                            () => tempApplyInterfaceAddonsOnly = v ?? false,
+                          )
+                        : null,
+                  ),
+                ),
+                const Divider(),
+                CheckboxListTile(
+                  title: const Text('Clean apply'),
+                  subtitle: const Text('Delete existing files before applying'),
+                  value: tempCleanApply,
+                  onChanged: (v) =>
+                      setState2(() => tempCleanApply = v ?? false),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: tempFlavors.isEmpty
+                  ? null
+                  : () {
+                      setState(() {
+                        applySavedVars = tempApplySavedVars;
+                        applyConfig = tempApplyConfig;
+                        applyBindings = tempApplyBindings;
+                        applyInterface = tempApplyInterface;
+                        applyInterfaceAddonsOnly = tempApplyInterfaceAddonsOnly;
+                        cleanApply = tempCleanApply;
+                        _applyFlavorFolders = tempFlavors;
+                      });
+                      Navigator.of(ctx).pop(true);
+                    },
+              child: const Text('Apply'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result == true;
+  }
+
   // Returns null on success, otherwise an error message
   Future<String?> _applyBackupFile(
     File archiveFile, {
@@ -3057,11 +2678,11 @@ try {
     bool applyInterfaceFilter = true,
     bool applyInterfaceAddonsOnlyFilter = true,
     bool cleanMode = true,
+    required Set<String> flavorFolders,
   }) async {
+    Directory? extractDir;
     try {
-      final extractDir = await Directory.systemTemp.createTemp(
-        'waddonsync_extract_',
-      );
+      extractDir = await Directory.systemTemp.createTemp('waddonsync_extract_');
       await _appendLog('Extracting backup to ${extractDir.path}');
 
       final extractedOk = await _extractArchive(archiveFile, extractDir.path);
@@ -3070,172 +2691,54 @@ try {
         return 'Failed to extract archive (unsupported format or 7z not found).';
       }
 
-      final wtfSource = Directory(p.join(extractDir.path, 'WTF'));
-      final ifaceSource = Directory(p.join(extractDir.path, 'Interface'));
-
-      final bool wtfHasFiles =
-          wtfSource.existsSync() &&
-          wtfSource
-              .listSync(recursive: true, followLinks: false)
-              .any((e) => e is File);
-      final bool ifaceHasFiles =
-          ifaceSource.existsSync() &&
-          ifaceSource
-              .listSync(recursive: true, followLinks: false)
-              .any((e) => e is File);
-
-      if (!wtfHasFiles && !ifaceHasFiles) {
+      final archiveFlavors = detectArchiveFlavors(extractDir.path);
+      if (archiveFlavors.isEmpty) {
         await _appendLog('Backup contains no files to restore');
         return 'Backup contains no files to restore.';
       }
+      await _appendLog(
+        'Backup contains: ${archiveFlavors.keys.map(flavorLabel).join(', ')}',
+      );
 
-      // Clean mode: delete selected categories before applying
-      if (cleanMode) {
-        await _appendLog('Clean mode enabled - removing old files...');
+      // Legacy backups (no version prefix) were always taken from retail, or
+      // from the root itself for non-standard single-install layouts.
+      final legacyTarget = detectedFlavors.any((f) => f.folder.isEmpty)
+          ? ''
+          : retailFolder;
 
-        if (wtfHasFiles &&
-            (applySavedVarsFilter ||
-                applyConfigFilter ||
-                applyBindingsFilter)) {
-          final wtfDest = Directory(wtfPath!);
-          if (wtfDest.existsSync()) {
-            await _appendLog('Cleaning WTF directory...');
-            try {
-              await wtfDest.delete(recursive: true);
-              await wtfDest.create(recursive: true);
-              await _appendLog('WTF directory cleaned');
-            } catch (e, st) {
-              await _appendLog('Failed cleaning WTF: $e\n$st');
-              return 'Failed to clean WTF directory: $e';
-            }
-          }
+      final targets = detectedFlavors.where(
+        (f) => flavorFolders.contains(f.folder),
+      );
+      var appliedAny = false;
+      for (final target in targets) {
+        final source =
+            archiveFlavors[target.folder] ??
+            (target.folder == legacyTarget ? archiveFlavors[''] : null);
+        if (source == null) {
+          await _appendLog('Backup has no data for ${target.label}, skipping');
+          continue;
         }
-
-        if (ifaceHasFiles && applyInterfaceFilter) {
-          if (applyInterfaceAddonsOnlyFilter) {
-            // Only clean the AddOns subfolder inside Interface
-            final addonsDest = Directory(p.join(interfacePath!, 'AddOns'));
-            if (addonsDest.existsSync()) {
-              await _appendLog('Cleaning Interface/AddOns directory...');
-              try {
-                await addonsDest.delete(recursive: true);
-                await addonsDest.create(recursive: true);
-                await _appendLog('Interface/AddOns directory cleaned');
-              } catch (e, st) {
-                await _appendLog('Failed cleaning Interface/AddOns: $e\n$st');
-                return 'Failed to clean Interface/AddOns directory: $e';
-              }
-            }
-          } else {
-            final ifaceDest = Directory(interfacePath!);
-            if (ifaceDest.existsSync()) {
-              await _appendLog('Cleaning Interface directory...');
-              try {
-                await ifaceDest.delete(recursive: true);
-                await ifaceDest.create(recursive: true);
-                await _appendLog('Interface directory cleaned');
-              } catch (e, st) {
-                await _appendLog('Failed cleaning Interface: $e\n$st');
-                return 'Failed to clean Interface directory: $e';
-              }
-            }
-          }
-        }
+        await _appendLog('Restoring ${target.label} -> ${target.path}');
+        final err = await _applyFlavor(
+          source,
+          target,
+          applySavedVarsFilter: applySavedVarsFilter,
+          applyConfigFilter: applyConfigFilter,
+          applyBindingsFilter: applyBindingsFilter,
+          applyInterfaceFilter: applyInterfaceFilter,
+          applyInterfaceAddonsOnlyFilter: applyInterfaceAddonsOnlyFilter,
+          cleanMode: cleanMode,
+        );
+        if (err != null) return '${target.label}: $err';
+        appliedAny = true;
       }
 
-      if (wtfHasFiles) {
-        await _appendLog('Applying WTF...');
-        try {
-          // Filter out files based on user selection
-          final filesToApply = <File>[];
-
-          for (final entity in wtfSource.listSync(
-            recursive: true,
-            followLinks: false,
-          )) {
-            if (entity is! File) continue;
-
-            final rel = p.relative(entity.path, from: wtfSource.path);
-            final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
-            final baseName = p.basename(entity.path).toLowerCase();
-
-            bool shouldInclude = false;
-
-            // Config.wtf
-            if (baseName == 'config.wtf') {
-              shouldInclude = applyConfigFilter;
-            }
-            // Bindings
-            else if (baseName.contains('binding') ||
-                baseName == 'bindings-cache.wtf') {
-              shouldInclude = applyBindingsFilter;
-            }
-            // SavedVariables
-            else if (parts.contains('savedvariables')) {
-              shouldInclude = applySavedVarsFilter;
-            }
-            // Other WTF files (include if any WTF filter is on)
-            else {
-              shouldInclude =
-                  applySavedVarsFilter ||
-                  applyConfigFilter ||
-                  applyBindingsFilter;
-            }
-
-            if (shouldInclude) {
-              filesToApply.add(entity);
-            }
-          }
-
-          if (filesToApply.isEmpty) {
-            await _appendLog('No WTF files selected to apply');
-          } else {
-            for (final file in filesToApply) {
-              final rel = p.relative(file.path, from: wtfSource.path);
-              final dest = File(p.join(wtfPath!, rel));
-              await dest.parent.create(recursive: true);
-              await file.copy(dest.path);
-            }
-            await _appendLog('Applied ${filesToApply.length} WTF file(s)');
-          }
-        } catch (e, st) {
-          await _appendLog('Failed copying WTF: $e\n$st');
-          return 'Failed to copy WTF files: $e';
-        }
-      }
-
-      if (ifaceHasFiles && applyInterfaceFilter) {
-        if (applyInterfaceAddonsOnlyFilter) {
-          // Only apply files under Interface/AddOns/
-          await _appendLog('Applying Interface/AddOns only...');
-          final addonsSource = Directory(p.join(ifaceSource.path, 'AddOns'));
-          if (addonsSource.existsSync()) {
-            try {
-              await _copyDirectoryContents(
-                addonsSource,
-                Directory(p.join(interfacePath!, 'AddOns')),
-              );
-            } catch (e, st) {
-              await _appendLog('Failed copying Interface/AddOns: $e\n$st');
-              return 'Failed to copy Interface/AddOns files: $e';
-            }
-          } else {
-            await _appendLog('No AddOns folder found in backup Interface');
-          }
-        } else {
-          await _appendLog('Applying Interface...');
-          try {
-            await _copyDirectoryContents(
-              ifaceSource,
-              Directory(interfacePath!),
-            );
-          } catch (e, st) {
-            await _appendLog('Failed copying Interface: $e\n$st');
-            return 'Failed to copy Interface files: $e';
-          }
-        }
-      } else if (ifaceHasFiles && !applyInterfaceFilter) {
-        await _appendLog('Skipping Interface (filter disabled)');
+      if (!appliedAny) {
+        final available = archiveFlavors.keys
+            .map((k) => flavorLabel(k.isEmpty ? retailFolder : k))
+            .join(', ');
+        return 'Backup has no data for the selected game versions '
+            '(backup contains: $available).';
       }
 
       await _appendLog('Apply completed');
@@ -3243,7 +2746,168 @@ try {
     } catch (e, st) {
       await _appendLog('Apply backup failed: $e\n$st');
       return 'Unexpected error: $e';
+    } finally {
+      try {
+        if (extractDir != null && await extractDir.exists()) {
+          await extractDir.delete(recursive: true);
+        }
+      } catch (_) {
+        // best effort
+      }
     }
+  }
+
+  // Applies one extracted flavor folder (containing WTF/ and/or Interface/)
+  // onto an installed flavor. Returns null on success, otherwise an error.
+  Future<String?> _applyFlavor(
+    Directory source,
+    WowFlavor target, {
+    required bool applySavedVarsFilter,
+    required bool applyConfigFilter,
+    required bool applyBindingsFilter,
+    required bool applyInterfaceFilter,
+    required bool applyInterfaceAddonsOnlyFilter,
+    required bool cleanMode,
+  }) async {
+    final wtfSource = Directory(p.join(source.path, 'WTF'));
+    final ifaceSource = Directory(p.join(source.path, 'Interface'));
+    final wtfDestPath = target.wtfPath;
+    final ifaceDestPath = target.interfacePath;
+
+    final bool wtfHasFiles =
+        wtfSource.existsSync() &&
+        wtfSource
+            .listSync(recursive: true, followLinks: false)
+            .any((e) => e is File);
+    final bool ifaceHasFiles =
+        ifaceSource.existsSync() &&
+        ifaceSource
+            .listSync(recursive: true, followLinks: false)
+            .any((e) => e is File);
+
+    // Clean mode: delete selected categories before applying
+    if (cleanMode) {
+      await _appendLog('Clean mode enabled - removing old files...');
+
+      if (wtfHasFiles &&
+          (applySavedVarsFilter || applyConfigFilter || applyBindingsFilter)) {
+        final wtfDest = Directory(wtfDestPath);
+        if (wtfDest.existsSync()) {
+          await _appendLog('Cleaning WTF directory...');
+          try {
+            await wtfDest.delete(recursive: true);
+            await wtfDest.create(recursive: true);
+            await _appendLog('WTF directory cleaned');
+          } catch (e, st) {
+            await _appendLog('Failed cleaning WTF: $e\n$st');
+            return 'Failed to clean WTF directory: $e';
+          }
+        }
+      }
+
+      if (ifaceHasFiles && applyInterfaceFilter) {
+        final cleanDest = applyInterfaceAddonsOnlyFilter
+            ? Directory(p.join(ifaceDestPath, 'AddOns'))
+            : Directory(ifaceDestPath);
+        final label = applyInterfaceAddonsOnlyFilter
+            ? 'Interface/AddOns'
+            : 'Interface';
+        if (cleanDest.existsSync()) {
+          await _appendLog('Cleaning $label directory...');
+          try {
+            await cleanDest.delete(recursive: true);
+            await cleanDest.create(recursive: true);
+            await _appendLog('$label directory cleaned');
+          } catch (e, st) {
+            await _appendLog('Failed cleaning $label: $e\n$st');
+            return 'Failed to clean $label directory: $e';
+          }
+        }
+      }
+    }
+
+    if (wtfHasFiles) {
+      await _appendLog('Applying WTF...');
+      try {
+        final filesToApply = <File>[];
+
+        for (final entity in wtfSource.listSync(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (entity is! File) continue;
+
+          final rel = p.relative(entity.path, from: wtfSource.path);
+          final parts = p.split(rel).map((s) => s.toLowerCase()).toList();
+          final baseName = p.basename(entity.path).toLowerCase();
+
+          bool shouldInclude;
+          if (baseName == 'config.wtf') {
+            shouldInclude = applyConfigFilter;
+          } else if (baseName.contains('binding') ||
+              baseName == 'bindings-cache.wtf') {
+            shouldInclude = applyBindingsFilter;
+          } else if (parts.contains('savedvariables')) {
+            shouldInclude = applySavedVarsFilter;
+          } else {
+            // Other WTF files (include if any WTF filter is on)
+            shouldInclude =
+                applySavedVarsFilter ||
+                applyConfigFilter ||
+                applyBindingsFilter;
+          }
+
+          if (shouldInclude) filesToApply.add(entity);
+        }
+
+        if (filesToApply.isEmpty) {
+          await _appendLog('No WTF files selected to apply');
+        } else {
+          for (final file in filesToApply) {
+            final rel = p.relative(file.path, from: wtfSource.path);
+            final dest = File(p.join(wtfDestPath, rel));
+            await dest.parent.create(recursive: true);
+            await file.copy(dest.path);
+          }
+          await _appendLog('Applied ${filesToApply.length} WTF file(s)');
+        }
+      } catch (e, st) {
+        await _appendLog('Failed copying WTF: $e\n$st');
+        return 'Failed to copy WTF files: $e';
+      }
+    }
+
+    if (ifaceHasFiles && applyInterfaceFilter) {
+      if (applyInterfaceAddonsOnlyFilter) {
+        await _appendLog('Applying Interface/AddOns only...');
+        final addonsSource = Directory(p.join(ifaceSource.path, 'AddOns'));
+        if (addonsSource.existsSync()) {
+          try {
+            await _copyDirectoryContents(
+              addonsSource,
+              Directory(p.join(ifaceDestPath, 'AddOns')),
+            );
+          } catch (e, st) {
+            await _appendLog('Failed copying Interface/AddOns: $e\n$st');
+            return 'Failed to copy Interface/AddOns files: $e';
+          }
+        } else {
+          await _appendLog('No AddOns folder found in backup Interface');
+        }
+      } else {
+        await _appendLog('Applying Interface...');
+        try {
+          await _copyDirectoryContents(ifaceSource, Directory(ifaceDestPath));
+        } catch (e, st) {
+          await _appendLog('Failed copying Interface: $e\n$st');
+          return 'Failed to copy Interface files: $e';
+        }
+      }
+    } else if (ifaceHasFiles && !applyInterfaceFilter) {
+      await _appendLog('Skipping Interface (filter disabled)');
+    }
+
+    return null;
   }
 
   @override
@@ -3405,39 +3069,48 @@ try {
                   if (wowRootPath != null) ...[
                     Row(
                       children: [
-                        Expanded(child: Text('WTF: ${wtfPath ?? 'missing'}')),
-                        if (wtfPath != null)
-                          IconButton(
-                            tooltip: 'Open WTF',
-                            onPressed: () async {
-                              await Process.run('explorer', [
-                                p.normalize(wtfPath!),
-                              ]);
-                            },
-                            icon: const Icon(Icons.folder_open),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Interface: ${interfacePath ?? 'missing'}',
-                          ),
+                        const Text(
+                          'Game versions',
+                          style: TextStyle(fontWeight: FontWeight.bold),
                         ),
-                        if (interfacePath != null)
-                          IconButton(
-                            tooltip: 'Open Interface',
-                            onPressed: () async {
-                              await Process.run('explorer', [
-                                p.normalize(interfacePath!),
-                              ]);
-                            },
-                            icon: const Icon(Icons.folder_open),
-                          ),
+                        IconButton(
+                          tooltip: 'Rescan game versions',
+                          icon: const Icon(Icons.refresh, size: 18),
+                          onPressed: () => setState(_rescanFlavors),
+                        ),
                       ],
                     ),
+                    if (detectedFlavors.isEmpty)
+                      const Text(
+                        'No WoW installations found in this folder. Select the "World of Warcraft" folder that contains _retail_, _classic_, etc.',
+                      ),
+                    for (final flavor in detectedFlavors)
+                      CheckboxListTile(
+                        title: Text(flavor.label),
+                        subtitle: Text(flavor.path),
+                        value: selectedFlavorFolders.contains(flavor.folder),
+                        onChanged: (v) {
+                          setState(() {
+                            final next = {...selectedFlavorFolders};
+                            if (v ?? false) {
+                              next.add(flavor.folder);
+                            } else {
+                              next.remove(flavor.folder);
+                            }
+                            _selectedFlavorFolders = next;
+                          });
+                          _saveSettings(showSnack: false);
+                        },
+                        secondary: IconButton(
+                          tooltip: 'Open ${flavor.label} folder',
+                          icon: const Icon(Icons.folder_open),
+                          onPressed: () async {
+                            await Process.run('explorer', [
+                              p.normalize(flavor.path),
+                            ]);
+                          },
+                        ),
+                      ),
                   ],
 
                   const SizedBox(height: 20),
@@ -3449,8 +3122,10 @@ try {
                   CheckboxListTile(
                     title: const Text('SavedVariables (recommended)'),
                     value: includeSavedVars,
-                    onChanged: (v) =>
-                        setState(() => includeSavedVars = v ?? true),
+                    onChanged: (v) => setState(() {
+                      includeSavedVars = v ?? true;
+                      _saveSettings(showSnack: false);
+                    }),
                   ),
                   CheckboxListTile(
                     title: const Text('Config.wtf (engine settings)'),
@@ -3462,6 +3137,10 @@ try {
                   ),
                   CheckboxListTile(
                     title: const Text('Keybindings (bindings-cache.wtf)'),
+                    subtitle: const Text(
+                      'Blizzard syncs bindings to its servers by default; only '
+                      'useful if synchronizeBindings is off',
+                    ),
                     value: includeBindings,
                     onChanged: (v) => setState(() {
                       includeBindings = v ?? false;
@@ -3505,7 +3184,7 @@ try {
                     children: [
                       // Local backup actions
                       ElevatedButton(
-                        onPressed: (wowRootPath != null && !isWorking)
+                        onPressed: (selectedFlavors.isNotEmpty && !isWorking)
                             ? handleCreateZip
                             : null,
                         child: isWorking
@@ -3523,7 +3202,7 @@ try {
                       IconButton(
                         icon: const Icon(Icons.upload),
                         tooltip: 'Zip and Upload to Google Drive',
-                        onPressed: (wowRootPath != null && !isWorking)
+                        onPressed: (selectedFlavors.isNotEmpty && !isWorking)
                             ? handleUploadAndRegister
                             : null,
                       ),
