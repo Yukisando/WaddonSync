@@ -44,4 +44,6 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\waddonsync.exe"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\waddonsync.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\waddonsync.exe"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\waddonsync.exe"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; Silent installs come from the in-app updater: reopen the app afterwards.
+Filename: "{app}\waddonsync.exe"; Flags: nowait runasoriginaluser; Check: WizardSilent

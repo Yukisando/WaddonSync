@@ -12,7 +12,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter/services.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 // Services
 import 'services/google_drive_service.dart';
@@ -1901,36 +1900,66 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
+      // Installed copies (setup wizard leaves unins000.exe next to the exe)
+      // update by running the new installer silently over the old install.
+      // Portable copies keep the zip + updater-script flow below.
       final installerAsset = _updateService
           .getPreferredWindowsInstallerExeAsset(release);
-      if (installerAsset != null && installerAsset.downloadUrl.isNotEmpty) {
-        final proceed = await _confirmInstallerExeUpdate(installerAsset.name);
+      if (_isInstalledCopy() &&
+          installerAsset != null &&
+          installerAsset.downloadUrl.isNotEmpty) {
+        final proceed = await _confirmInstallerExeUpdate(
+          result.latestVersion,
+        );
         if (!proceed) return;
         if (!mounted) return;
 
         await _appendLog(
-          'Opening installer update asset for ${result.latestVersion}: ${installerAsset.name}',
+          'In-app installer update started to ${result.latestVersion}: ${installerAsset.name}',
+        );
+        _setUpdateProgress('Preparing download...', progress: 0.05);
+
+        final stageDir = await Directory.systemTemp.createTemp(
+          'waddonsync_update_stage_',
+        );
+        final installerFile = File(p.join(stageDir.path, installerAsset.name));
+        await _downloadUpdateZip(
+          installerAsset.downloadUrl,
+          installerFile,
+          onProgress: (received, total) {
+            if (total != null && total > 0) {
+              final pct = received / total;
+              _setUpdateProgress(
+                'Downloading update... ${(pct * 100).toStringAsFixed(0)}%',
+                progress: (0.05 + pct * 0.90).clamp(0.05, 0.95),
+              );
+            } else {
+              _setUpdateProgress('Downloading update...', progress: null);
+            }
+          },
         );
 
-        _setUpdateProgress('Opening installer...', progress: null);
-        final opened = await launchUrl(
-          Uri.parse(installerAsset.downloadUrl),
-          mode: LaunchMode.externalApplication,
-        );
-        if (!opened) {
-          throw Exception('Could not open installer URL.');
-        }
+        _setUpdateProgress('Installing update...', progress: 0.98);
+        await _appendLog('Launching installer: ${installerFile.path}');
+        // Inno Setup reuses the existing install folder (same AppId).
+        // Windows may show a UAC prompt; the installer relaunches the app.
+        await Process.start(installerFile.path, const [
+          '/SILENT',
+          '/SUPPRESSMSGBOXES',
+          '/NORESTART',
+          '/CLOSEAPPLICATIONS',
+        ], mode: ProcessStartMode.detached);
 
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
+          const SnackBar(
             content: Text(
-              'Installer downloaded/opened for ${result.latestVersion}. Run it and choose installation folder in the setup wizard.',
+              'Installing update now. App will restart automatically.',
             ),
-            duration: const Duration(seconds: 8),
           ),
         );
-        return;
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+        exit(0);
       }
 
       final proceed = await _confirmUpdateWarning();
@@ -2116,23 +2145,26 @@ class _HomePageState extends State<HomePage> {
     return confirmed == true;
   }
 
-  Future<bool> _confirmInstallerExeUpdate(String installerName) async {
+  bool _isInstalledCopy() {
+    final appDir = p.dirname(Platform.resolvedExecutable);
+    return File(p.join(appDir, 'unins000.exe')).existsSync();
+  }
+
+  Future<bool> _confirmInstallerExeUpdate(String version) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Open installer update'),
-        content: Column(
+        title: Text('Update to $version'),
+        content: const Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'This app uses a standard Windows setup installer for updates.',
+            Text(
+              'WaddonSync will download the update, close, install it and reopen.',
             ),
-            const SizedBox(height: 10),
-            Text('Installer asset: $installerName'),
-            const SizedBox(height: 10),
-            const Text(
-              'Run the setup wizard and choose the installation path.',
+            SizedBox(height: 10),
+            Text(
+              'Windows may ask for permission to make changes. Your backups and settings are kept.',
             ),
           ],
         ),
@@ -2143,7 +2175,7 @@ class _HomePageState extends State<HomePage> {
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Open Installer'),
+            child: const Text('Update now'),
           ),
         ],
       ),
@@ -3276,7 +3308,7 @@ try {
 
                   const SizedBox(height: 8),
                   const Text(
-                    'Updates now prefer a standard setup installer. Portable ZIP remains available for no-install use.',
+                    'Updates download and install inside the app, then WaddonSync restarts.',
                     style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
                   ),
 
