@@ -20,6 +20,11 @@ class GoogleDriveService {
   static const String backupFolderName = 'WaddonSync Backups';
   String? _backupFolderId;
 
+  /// Web link to the "WaddonSync Backups" folder (null until initialized).
+  String? get backupFolderUrl => _backupFolderId == null
+      ? null
+      : 'https://drive.google.com/drive/folders/$_backupFolderId';
+
   GoogleDriveService(this.log)
     : _tokenStorage = TokenStorageService(log),
       _oauthService = GoogleOAuthService(log);
@@ -163,6 +168,7 @@ class GoogleDriveService {
   Future<Map<String, String?>?> uploadFile(
     File file, {
     String? overwriteFileId,
+    String? versionsLabel,
     void Function(int sent, int total)? onProgress,
   }) async {
     try {
@@ -189,6 +195,9 @@ class GoogleDriveService {
       });
       final media = drive.Media(counted, fileSize);
       const fields = 'id, name, webViewLink, size, createdTime';
+      final appProps = versionsLabel == null || versionsLabel.isEmpty
+          ? null
+          : {'versions': versionsLabel};
       final description =
           'WaddonSync backup saved on ${DateTime.now().toIso8601String()}';
 
@@ -198,7 +207,8 @@ class GoogleDriveService {
         uploadedFile = await _driveApi!.files.update(
           drive.File()
             ..name = fileName
-            ..description = description,
+            ..description = description
+            ..appProperties = appProps,
           overwriteFileId,
           uploadMedia: media,
           uploadOptions: drive.ResumableUploadOptions(),
@@ -209,7 +219,8 @@ class GoogleDriveService {
           drive.File()
             ..name = fileName
             ..parents = [_backupFolderId!]
-            ..description = description,
+            ..description = description
+            ..appProperties = appProps,
           uploadMedia: media,
           uploadOptions: drive.ResumableUploadOptions(),
           $fields: fields,
@@ -301,7 +312,8 @@ class GoogleDriveService {
         q: query,
         spaces: 'drive',
         orderBy: 'modifiedTime desc',
-        $fields: 'files(id, name, size, createdTime, modifiedTime)',
+        $fields:
+            'files(id, name, size, createdTime, modifiedTime, appProperties)',
       );
 
       if (fileList.files == null || fileList.files!.isEmpty) {
@@ -317,6 +329,7 @@ class GoogleDriveService {
               'size': file.size,
               'createdTime': file.createdTime?.toIso8601String(),
               'modifiedTime': file.modifiedTime?.toIso8601String(),
+              'versions': file.appProperties?['versions'],
             },
           )
           .toList();
