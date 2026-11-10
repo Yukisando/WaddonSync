@@ -101,6 +101,10 @@ class _HomePageState extends State<HomePage> {
   String? lastZipPath;
 
   bool isWorking = false;
+  // Progress card for backup / upload work (empty label = hidden).
+  String _taskLabel = '';
+  double? _taskProgress;
+  int _lastProgressPct = -1;
 
   // Game versions (_retail_, _classic_era_, ...) found under wowRootPath.
   List<WowFlavor> detectedFlavors = [];
@@ -542,8 +546,145 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  void _setTask(String label, {double? progress}) {
+    if (!mounted) return;
+    setState(() {
+      _taskLabel = label;
+      _taskProgress = progress;
+    });
+  }
+
+  void _clearTask() => _setTask('');
+
+  /// Memory-card style picker: "New save" or one of the saves already on
+  /// Google Drive to overwrite. Returns null when cancelled.
+  Future<_SaveSlot?> _pickSaveSlot() async {
+    _driveService ??= GoogleDriveService(_appendLog);
+    _setTask('Loading your Google Drive saves...');
+    List<Map<String, dynamic>> saves = [];
+    try {
+      final ok = await _driveService!.initialize();
+      if (!ok) {
+        _clearTask();
+        if (!mounted) return null;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not connect to Google Drive.')),
+        );
+        return null;
+      }
+      saves = await _driveService!.listBackups();
+    } finally {
+      _clearTask();
+    }
+    if (!mounted) return null;
+
+    String fmtSize(dynamic raw) {
+      final b = int.tryParse('${raw ?? ''}') ?? 0;
+      if (b <= 0) return '';
+      final mb = b / (1024 * 1024);
+      return mb >= 1024
+          ? '${(mb / 1024).toStringAsFixed(2)} GB'
+          : '${mb.toStringAsFixed(1)} MB';
+    }
+
+    String fmtDate(dynamic raw) {
+      final d = DateTime.tryParse('${raw ?? ''}')?.toLocal();
+      if (d == null) return '';
+      String two(int n) => n.toString().padLeft(2, '0');
+      return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+    }
+
+    return showDialog<_SaveSlot>(
+      context: context,
+      builder: (ctx) {
+        final scheme = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          title: const Text('Choose a save slot'),
+          content: SizedBox(
+            width: 460,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                Card(
+                  color: scheme.primaryContainer,
+                  child: ListTile(
+                    leading: const Icon(Icons.add_circle_outline),
+                    title: const Text('New save'),
+                    subtitle: const Text('Keep every existing save'),
+                    onTap: () => Navigator.of(ctx).pop(const _SaveSlot(null)),
+                  ),
+                ),
+                if (saves.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(4, 12, 4, 4),
+                    child: Text('Or overwrite a save'),
+                  ),
+                  for (var i = 0; i < saves.length; i++)
+                    Card(
+                      child: ListTile(
+                        leading: CircleAvatar(child: Text('${i + 1}')),
+                        title: Text(
+                          fmtDate(
+                            saves[i]['modifiedTime'] ?? saves[i]['createdTime'],
+                          ).ifEmpty('${saves[i]['name']}'),
+                        ),
+                        subtitle: Text(
+                          [
+                            '${saves[i]['name'] ?? ''}',
+                            fmtSize(saves[i]['size']),
+                          ].where((t) => t.isNotEmpty).join(' · '),
+                        ),
+                        trailing: const Icon(Icons.save_as_outlined),
+                        onTap: () async {
+                          final yes = await showDialog<bool>(
+                            context: ctx,
+                            builder: (c2) => AlertDialog(
+                              title: const Text('Overwrite this save?'),
+                              content: Text(
+                                'Save ${i + 1} will be replaced by your current '
+                                'setup. The old content cannot be recovered.',
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.of(c2).pop(false),
+                                  child: const Text('Cancel'),
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.of(c2).pop(true),
+                                  child: const Text('Overwrite'),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (yes == true && ctx.mounted) {
+                            Navigator.of(
+                              ctx,
+                            ).pop(_SaveSlot(saves[i]['fileId'] as String?));
+                          }
+                        },
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   // Upload to Google Drive
-  Future<Map<String, String?>?> uploadToDrive(File file) async {
+  Future<Map<String, String?>?> uploadToDrive(
+    File file, {
+    String? overwriteFileId,
+    void Function(int sent, int total)? onProgress,
+  }) async {
     try {
       if (_driveService == null) {
         await _appendLog('Initializing Google Drive service...');
@@ -568,7 +709,11 @@ class _HomePageState extends State<HomePage> {
 
       // Upload file
       await _appendLog('Uploading to Google Drive...');
-      final result = await _driveService!.uploadFile(file);
+      final result = await _driveService!.uploadFile(
+        file,
+        overwriteFileId: overwriteFileId,
+        onProgress: onProgress,
+      );
 
       return result;
     } catch (e, st) {
@@ -696,6 +841,7 @@ class _HomePageState extends State<HomePage> {
       throw Exception('No game version selected');
     }
     setState(() => isWorking = true);
+    if (_taskLabel.isEmpty) _setTask('Compressing backup...');
     try {
       final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
       final args = <String, dynamic>{
@@ -751,14 +897,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> handleCreateZip() async {
     if (wowRootPath == null) return;
     try {
-      final messenger = ScaffoldMessenger.of(context);
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Creating backup...'),
-          duration: Duration(seconds: 30),
-        ),
-      );
       final zip = await createZip();
+      _clearTask();
       if (!mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -792,6 +932,7 @@ class _HomePageState extends State<HomePage> {
         await uploadFileAndRegister(zip);
       }
     } catch (e) {
+      _clearTask();
       await _appendLog('Error while zipping: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -805,22 +946,19 @@ class _HomePageState extends State<HomePage> {
     if (wowRootPath == null) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      // make the user aware we are zipping first
-      // Use a long duration so the snackbar stays until uploadFileAndRegister
-      // manually dismisses it — prevents a silent gap when 7-zip compression
-      // takes longer than a short timer would allow.
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Zipping...'),
-          duration: Duration(hours: 1),
-        ),
-      );
+      // Choose the save slot first so the user can walk away during the work.
+      final slot = await _pickSaveSlot();
+      if (slot == null || !mounted) return;
+      _setTask('Step 1 of 2 · Compressing backup...');
       final zip = await createZip();
       if (!mounted) return;
-
-      // after creating a zip, upload it (shared logic)
-      await uploadFileAndRegister(zip);
+      await uploadFileAndRegister(
+        zip,
+        slot: slot,
+        stepPrefix: 'Step 2 of 2 · ',
+      );
     } catch (e) {
+      _clearTask();
       await _appendLog('Error while uploading/registering: $e');
       setState(() => isWorking = false);
       messenger.hideCurrentSnackBar();
@@ -850,24 +988,29 @@ class _HomePageState extends State<HomePage> {
     await uploadFileAndRegister(f);
   }
 
-  Future<void> uploadFileAndRegister(File zip) async {
+  Future<void> uploadFileAndRegister(
+    File zip, {
+    _SaveSlot? slot,
+    String stepPrefix = '',
+  }) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      // start uploading
+      slot ??= await _pickSaveSlot();
+      if (slot == null || !mounted) {
+        _clearTask();
+        return;
+      }
+      final chosen = slot;
       messenger.hideCurrentSnackBar();
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Uploading to Google Drive...'),
-          duration: Duration(seconds: 120),
-        ),
-      );
       setState(() => isWorking = true);
+      _setTask('${stepPrefix}Connecting to Google Drive...');
       // quick network check to provide clearer feedback before attempting upload
       final netOk = await _checkNetwork(host: 'www.google.com');
       if (!netOk) {
         final err =
             'Network unreachable: could not connect to the internet (check internet connection, firewall, or proxy).';
         await _appendLog('Upload network check failed: $err');
+        _clearTask();
         messenger.hideCurrentSnackBar();
         if (!mounted) return;
         showDialog<void>(
@@ -879,7 +1022,7 @@ class _HomePageState extends State<HomePage> {
               TextButton(
                 onPressed: () {
                   Navigator.of(ctx).pop();
-                  uploadFileAndRegister(zip);
+                  uploadFileAndRegister(zip, slot: chosen);
                 },
                 child: const Text('Retry'),
               ),
@@ -894,7 +1037,25 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final uploadResult = await uploadToDrive(zip);
+      final totalMb = (await zip.length()) / (1024 * 1024);
+      _lastProgressPct = -1;
+      final uploadResult = await uploadToDrive(
+        zip,
+        overwriteFileId: chosen.fileId,
+        onProgress: (sent, total) {
+          final pct = total > 0 ? sent / total : 0.0;
+          final whole = (pct * 100).floor();
+          if (whole == _lastProgressPct) return;
+          _lastProgressPct = whole;
+          final sentMb = sent / (1024 * 1024);
+          _setTask(
+            '${stepPrefix}Uploading to Google Drive · $whole% '
+            '(${sentMb.toStringAsFixed(0)} / ${totalMb.toStringAsFixed(0)} MB)',
+            progress: pct,
+          );
+        },
+      );
+      _clearTask();
       setState(() => isWorking = false);
 
       if (uploadResult == null || uploadResult['fileId'] == null) {
@@ -911,7 +1072,7 @@ class _HomePageState extends State<HomePage> {
               TextButton(
                 onPressed: () {
                   Navigator.of(ctx).pop();
-                  uploadFileAndRegister(zip);
+                  uploadFileAndRegister(zip, slot: chosen);
                 },
                 child: const Text('Retry'),
               ),
@@ -941,7 +1102,9 @@ class _HomePageState extends State<HomePage> {
       // Copy file ID to clipboard for convenience
       await Clipboard.setData(ClipboardData(text: fileId));
       if (!mounted) return;
-      final msg = 'Upload succeeded! File ID copied to clipboard.';
+      final msg = chosen.fileId == null
+          ? 'Saved to a new slot on Google Drive.'
+          : 'Save overwritten on Google Drive.';
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(content: Text(msg)));
 
@@ -994,6 +1157,7 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     } catch (e) {
+      _clearTask();
       await _appendLog('Error while uploading: $e');
       setState(() => isWorking = false);
       messenger.hideCurrentSnackBar();
@@ -1908,9 +2072,7 @@ class _HomePageState extends State<HomePage> {
       if (_isInstalledCopy() &&
           installerAsset != null &&
           installerAsset.downloadUrl.isNotEmpty) {
-        final proceed = await _confirmInstallerExeUpdate(
-          result.latestVersion,
-        );
+        final proceed = await _confirmInstallerExeUpdate(result.latestVersion);
         if (!proceed) return;
         if (!mounted) return;
 
@@ -2821,18 +2983,40 @@ try {
     if (cleanMode) {
       await _appendLog('Clean mode enabled - removing old files...');
 
-      if (wtfHasFiles &&
-          (applySavedVarsFilter || applyConfigFilter || applyBindingsFilter)) {
+      // Only clear what this restore will replace: SavedVariables folders
+      // (when the backup has them and the filter is on). Config.wtf and
+      // binding files are simply overwritten below, and anything else in WTF
+      // (other accounts' files, Config.wtf when not restored) is left alone.
+      if (wtfHasFiles && applySavedVarsFilter) {
+        final backupHasSavedVars = wtfSource
+            .listSync(recursive: true, followLinks: false)
+            .any(
+              (e) =>
+                  e is File &&
+                  p
+                      .split(p.relative(e.path, from: wtfSource.path))
+                      .any((s) => s.toLowerCase() == 'savedvariables'),
+            );
         final wtfDest = Directory(wtfDestPath);
-        if (wtfDest.existsSync()) {
-          await _appendLog('Cleaning WTF directory...');
+        if (backupHasSavedVars && wtfDest.existsSync()) {
+          await _appendLog('Cleaning SavedVariables folders...');
           try {
-            await wtfDest.delete(recursive: true);
-            await wtfDest.create(recursive: true);
-            await _appendLog('WTF directory cleaned');
+            final svDirs = wtfDest
+                .listSync(recursive: true, followLinks: false)
+                .whereType<Directory>()
+                .where(
+                  (d) => p.basename(d.path).toLowerCase() == 'savedvariables',
+                )
+                .toList();
+            for (final d in svDirs) {
+              if (d.existsSync()) await d.delete(recursive: true);
+            }
+            await _appendLog(
+              'Cleaned ${svDirs.length} SavedVariables folder(s)',
+            );
           } catch (e, st) {
-            await _appendLog('Failed cleaning WTF: $e\n$st');
-            return 'Failed to clean WTF directory: $e';
+            await _appendLog('Failed cleaning SavedVariables: $e\n$st');
+            return 'Failed to clean SavedVariables: $e';
           }
         }
       }
@@ -3283,6 +3467,33 @@ try {
                     ],
                   ),
 
+                  if (_taskLabel.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Card(
+                      color: Theme.of(context).colorScheme.primaryContainer,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _taskLabel,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 10),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: LinearProgressIndicator(
+                                value: _taskProgress,
+                                minHeight: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+
                   if (_isCheckingForUpdates) ...[
                     const SizedBox(height: 12),
                     Card(
@@ -3327,4 +3538,14 @@ try {
       ),
     );
   }
+}
+
+/// A Google Drive save slot: [fileId] null means "new save".
+class _SaveSlot {
+  final String? fileId;
+  const _SaveSlot(this.fileId);
+}
+
+extension on String {
+  String ifEmpty(String fallback) => isEmpty ? fallback : this;
 }

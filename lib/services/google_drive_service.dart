@@ -113,7 +113,7 @@ class GoogleDriveService {
 
     // Close existing client if any
     _httpClient?.close();
-    
+
     _httpClient = _AuthenticatedClient(_credentials!);
     _driveApi = drive.DriveApi(_httpClient!);
     await log('Drive API client created');
@@ -157,8 +157,14 @@ class GoogleDriveService {
     }
   }
 
-  /// Uploads a file to Google Drive
-  Future<Map<String, String?>?> uploadFile(File file) async {
+  /// Uploads a file to Google Drive as a new save, or over an existing save
+  /// when [overwriteFileId] is given (same Drive file, new content and name).
+  /// [onProgress] reports bytes sent so far and the total.
+  Future<Map<String, String?>?> uploadFile(
+    File file, {
+    String? overwriteFileId,
+    void Function(int sent, int total)? onProgress,
+  }) async {
     try {
       if (_driveApi == null) {
         await log('Drive API not initialized, initializing...');
@@ -174,24 +180,41 @@ class GoogleDriveService {
 
       await log('Uploading $fileName ($sizeMB MB) to Google Drive...');
 
-      // Delete old backups (keep only most recent)
-      await _deleteOldBackups();
+      // Count bytes as Drive pulls them from the file.
+      var sent = 0;
+      final counted = file.openRead().map((chunk) {
+        sent += chunk.length;
+        onProgress?.call(sent, fileSize);
+        return chunk;
+      });
+      final media = drive.Media(counted, fileSize);
+      const fields = 'id, name, webViewLink, size, createdTime';
+      final description =
+          'WaddonSync backup saved on ${DateTime.now().toIso8601String()}';
 
-      // Create file metadata
-      final driveFile = drive.File()
-        ..name = fileName
-        ..parents = [_backupFolderId!]
-        ..description =
-            'WaddonSync backup created on ${DateTime.now().toIso8601String()}';
-
-      // Upload file
-      final media = drive.Media(file.openRead(), fileSize);
-
-      final uploadedFile = await _driveApi!.files.create(
-        driveFile,
-        uploadMedia: media,
-        $fields: 'id, name, webViewLink, size, createdTime',
-      );
+      final drive.File uploadedFile;
+      if (overwriteFileId != null) {
+        await log('Overwriting save $overwriteFileId');
+        uploadedFile = await _driveApi!.files.update(
+          drive.File()
+            ..name = fileName
+            ..description = description,
+          overwriteFileId,
+          uploadMedia: media,
+          uploadOptions: drive.ResumableUploadOptions(),
+          $fields: fields,
+        );
+      } else {
+        uploadedFile = await _driveApi!.files.create(
+          drive.File()
+            ..name = fileName
+            ..parents = [_backupFolderId!]
+            ..description = description,
+          uploadMedia: media,
+          uploadOptions: drive.ResumableUploadOptions(),
+          $fields: fields,
+        );
+      }
 
       await log('Upload successful!');
       await log('File ID: ${uploadedFile.id}');
@@ -277,7 +300,7 @@ class GoogleDriveService {
       final fileList = await _driveApi!.files.list(
         q: query,
         spaces: 'drive',
-        orderBy: 'createdTime desc',
+        orderBy: 'modifiedTime desc',
         $fields: 'files(id, name, size, createdTime, modifiedTime)',
       );
 
@@ -316,7 +339,7 @@ class GoogleDriveService {
         return null;
       }
 
-      // Backups are already ordered by createdTime desc
+      // Backups are ordered newest-saved first (modifiedTime desc)
       final latest = backups.first;
       await log('Latest backup: ${latest['name']} (${latest['fileId']})');
 
@@ -324,34 +347,6 @@ class GoogleDriveService {
     } catch (e, st) {
       await log('Error finding latest backup: $e\n$st');
       return null;
-    }
-  }
-
-  /// Deletes old backups (keeps only the 3 most recent)
-  Future<void> _deleteOldBackups() async {
-    try {
-      final backups = await listBackups();
-
-      if (backups.length <= 3) {
-        return; // Keep at least 3 backups
-      }
-
-      await log('Deleting ${backups.length - 3} old backup(s)...');
-
-      // Delete all except the first 3 (most recent)
-      for (var i = 3; i < backups.length; i++) {
-        final fileId = backups[i]['fileId'] as String?;
-        if (fileId != null) {
-          try {
-            await _driveApi!.files.delete(fileId);
-            await log('Deleted old backup: ${backups[i]['name']}');
-          } catch (e) {
-            await log('Failed to delete backup $fileId: $e');
-          }
-        }
-      }
-    } catch (e, st) {
-      await log('Error deleting old backups: $e\n$st');
     }
   }
 
@@ -380,7 +375,7 @@ class GoogleDriveService {
       // Clean up HTTP client
       _httpClient?.close();
       _httpClient = null;
-      
+
       _driveApi = null;
       _credentials = null;
       _backupFolderId = null;
